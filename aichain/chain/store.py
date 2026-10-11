@@ -20,6 +20,8 @@ from aichain.board import Board
 from aichain.chain.errors import ChainHalted
 
 CHECKPOINT_EVERY = 120  # blocks (10 minutes at 5 s/block)
+# Bump when the state-root definition changes; older checkpoints are then not comparable.
+ROOT_VERSION = "v2"
 
 
 class ReplayMismatch(Exception):
@@ -110,7 +112,7 @@ class ChainStore:
 
 def replay(board: Board, store: ChainStore) -> dict[str, int]:
     """Rebuild `board` from the log. Raises ReplayMismatch if a checkpoint disagrees."""
-    txs = checks = 0
+    txs = checks = skipped = 0
     for kind, height, tx_type, body, root in store.entries():
         if height > board.height:
             board.advance(height - board.height)  # events are discarded: nothing to wake on replay
@@ -118,12 +120,17 @@ def replay(board: Board, store: ChainStore) -> dict[str, int]:
             board.apply(tx_type, body)
             txs += 1
         else:
-            if board.height == height and board.state_root() != root:
+            version, _, digest = root.rpartition(":")
+            if version != ROOT_VERSION:
+                skipped += 1  # written under an older state-root definition
+                continue
+            if board.height == height and board.state_root() != digest:
                 raise ReplayMismatch(f"state root differs at height {height}")
             checks += 1
     if store.tip() > board.height:  # blocks produced after the last transaction
         board.advance(store.tip() - board.height)
-    return {"transactions": txs, "checkpoints": checks, "height": board.height}
+    return {"transactions": txs, "checkpoints": checks, "old_checkpoints": skipped,
+            "height": board.height}
 
 
 def attach(board: Board, store: ChainStore) -> dict[str, int]:
@@ -145,7 +152,7 @@ def attach(board: Board, store: ChainStore) -> dict[str, int]:
         try:
             store.set_tip(board.height)
             if board.height % CHECKPOINT_EVERY == 0:
-                store.append_checkpoint(board.height, board.state_root())
+                store.append_checkpoint(board.height, f"{ROOT_VERSION}:{board.state_root()}")
         except Exception as e:
             board.halted = f"chain log write failed: {type(e).__name__}: {e}"
             raise ChainHalted(board.halted) from e

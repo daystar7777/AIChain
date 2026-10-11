@@ -142,6 +142,7 @@ class Board:
         # Called as recorder(tx_type, body) after each successful transaction (see `transaction`).
         self.recorder: Callable[[str, dict[str, Any]], None] | None = None
         self.halted: str | None = None  # set when the chain log can no longer be written
+        self._heartbeats: set[tuple[str, int]] = set()
 
     # ---- accounts ----
 
@@ -172,6 +173,7 @@ class Board:
                              "outcome": str(b.outcome) if b.outcome else None}
                          for k, b in sorted(self.bounties.items())},
             "answers": {k: asdict(a) for k, a in sorted(self.answers.items())},
+            "rep_events": sha256_hex(canonical_json(self.rep_events)),
         }
         return sha256_hex(canonical_json(state))
 
@@ -330,6 +332,17 @@ class Board:
         self._rep(ans.author, "answer_accepted", bounty_id=bounty_id, value_mP=b.reward_mP)
         self._rep(asker, "judge_ok", bounty_id=bounty_id)
         return [self._settle(b, BountyState.PAID)]
+
+    @transaction
+    def heartbeat(self, account: str, epoch: int) -> None:
+        """Liveness proof, one per account per epoch (720 blocks). Feeds reputation term U."""
+        self.account(account)
+        if epoch != self.height // 720:
+            raise BoardError(f"heartbeat for epoch {epoch} at height {self.height}")
+        if (account, epoch) in self._heartbeats:
+            raise BoardError("already sent a heartbeat this epoch")
+        self._heartbeats.add((account, epoch))
+        self._rep(account, "heartbeat", epoch=epoch)
 
     def _rep(self, account: str, kind: str, **extra: Any) -> None:
         self.rep_events.append({"account": account, "kind": kind, "height": self.height, **extra})

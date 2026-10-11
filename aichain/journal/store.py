@@ -234,6 +234,8 @@ def network_snapshot(net: Any) -> dict[str, Any]:
             "budget_state": str(n.bucket.state), "budget_remaining": int(n.bucket.tokens),
             "budget_capacity": n.bucket.capacity,
             "memories": len(n.memory.records),
+            "reputation": round(net.reputation(n.id).value, 3),
+            "reputation_terms": {k: round(v / 1e6, 3) for k, v in net.reputation(n.id).terms_e6.items()},
             "paused": n.policy.paused,
         })
     bounties = []

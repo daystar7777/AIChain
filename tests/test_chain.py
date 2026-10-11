@@ -102,3 +102,15 @@ def test_content_survives_restart(tmp_path):
     assert again.content.get(h) == {"title": "x"} and again.content_author[h] == "n1"
     assert set(again.board.accounts) == {"n1", "n2", "n3", "n4"}
     assert again.board.issued_mP == 4_000_000  # genesis grants not repeated
+
+
+def test_old_checkpoints_are_skipped_not_fatal(tmp_path):
+    db = tmp_path / "c.db"
+    store = ChainStore(db)
+    board = Board(Params())
+    attach(board, store)
+    board.open_account("a", 1000)
+    store.append_checkpoint(board.height, "deadbeef")  # pre-versioning format
+    board.advance(CHECKPOINT_EVERY)
+    stats = replay(Board(Params()), ChainStore(db))
+    assert stats["old_checkpoints"] == 1 and stats["checkpoints"] == 1

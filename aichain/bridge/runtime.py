@@ -17,7 +17,6 @@ from typing import Any
 
 from aichain.board import BountyState
 from aichain.common import fmt_P
-from aichain.node import REP_PLACEHOLDER
 from aichain.sim.network import Network
 
 TERMINAL = {"settled", "no_bounty", "failed"}
@@ -236,7 +235,7 @@ class NetworkRuntime:
                 {"id": n.id, "persona": n.cfg.persona,
                  "balance": fmt_P(board.accounts[n.id].balance_mP),
                  "locked": fmt_P(board.accounts[n.id].locked_mP),
-                 "reputation": REP_PLACEHOLDER, "budget_state": str(n.bucket.state)}
+                 "reputation": round(net.reputation(n.id).value, 3), "budget_state": str(n.bucket.state)}
                 for n in net.nodes.values()
             ],
             "recent_bounties": [

@@ -10,7 +10,8 @@ import json
 import sys
 from typing import Any, Callable, TextIO
 
-from aichain.board import Board, BoardEvent, Params
+from aichain.board import Board, BoardError, BoardEvent, Params
+from aichain.reputation import EPOCH_BLOCKS, Reputation, for_board
 from aichain.content import ContentStore
 from aichain.gateways.llm.base import LLMGateway
 from aichain.gateways.web import SearchGateway
@@ -56,6 +57,7 @@ class Network:
         # Set by Node.run_episode so every entry logged during an episode carries its id.
         self.current_episode: str | None = None
         self.listener_errors = 0
+        self._rep_cache: dict[str, tuple] = {}
 
     def clock_minutes(self) -> float:
         return self.board.height * SECONDS_PER_BLOCK / 60
@@ -87,6 +89,15 @@ class Network:
         if self.chain is not None:
             node.restore_from_chain()
         return node
+
+    def reputation(self, account: str) -> Reputation:
+        """Deterministic reputation (03 doc 4.3), cached until height or events change."""
+        key = (account, self.board.height, len(self.board.rep_events))
+        cached = self._rep_cache.get(account)
+        if cached is None or cached[0] != key:
+            cached = (key, for_board(self.board, account))
+            self._rep_cache[account] = cached
+        return cached[1]
 
     def put_content(self, obj: Any, author: str) -> str:
         h = self.content.put(obj)
@@ -163,6 +174,12 @@ class Network:
             n = self.research_interval_blocks
             if n and self.board.height % n == 0:
                 self.research([nd.id for nd in self.nodes.values() if not nd.has_pending])
+            if self.board.height % EPOCH_BLOCKS == 0 and not self.halted:
+                for node in self.nodes.values():  # Core duty, no LLM (04 doc 6.1)
+                    try:
+                        self.board.heartbeat(node.id, self.board.height // EPOCH_BLOCKS)
+                    except BoardError:
+                        pass
             for node in self.nodes.values():
                 node.run_duties()
             self.run_until_idle()

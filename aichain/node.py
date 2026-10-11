@@ -60,8 +60,6 @@ from aichain.chain.errors import ChainHalted
 if TYPE_CHECKING:
     from aichain.sim.network import Network
 
-# Placeholder until reputation is computed from rep_events (03 doc 4.3); new nodes start ≈ 0.45.
-REP_PLACEHOLDER = 0.45
 # Default trust of web-sourced memories (04 doc 4.1, 05 doc 1.4).
 WEB_TRUST = 0.3
 # 04 doc 3.3: argument errors may be retried twice; the third consecutive failure ends the episode.
@@ -228,7 +226,7 @@ class Node:
             budget_remaining=str(self.bucket.remaining()),
             budget_state=str(self.bucket.state),
             balance=fmt_P(acct.balance_mP).rstrip("P"),
-            reputation=f"{REP_PLACEHOLDER:.2f}",
+            reputation=f"{self.net.reputation(self.id).value:.2f}",
             persona_layer=self.persona_layer,
         )
         to_judge = [b for b in board.bounties.values()
@@ -239,7 +237,8 @@ class Node:
             f"- 잔액 {fmt_P(acct.balance_mP)}, 잠김 {fmt_P(acct.locked_mP)}, "
             f"사용 가능 {fmt_P(acct.available_mP)}, "
             f"최근 1시간 지출 {fmt_P(self.policy.spent_last_hour(board.height))}\n"
-            f"- 평판 {REP_PLACEHOLDER:.2f} (프로토타입: 고정값)\n"
+            f"- 평판 {self.net.reputation(self.id).value:.2f}\n"
+            f"- 다른 노드 평판: {self._peer_reputations()}\n"
             f"- LLM 예산 {self.bucket.remaining()} 토큰, 상태 {self.bucket.state}\n"
             f"- 내가 판정할 현상금 {len(to_judge)}개\n\n"
             "### 열린 현상금\n"
@@ -280,7 +279,7 @@ class Node:
             b = board.bounty(p["bounty_id"])
             q = self.net.content.get(b.question_hash)
             inner = data_block(f"peer:{b.asker}", json.dumps(q, ensure_ascii=False, indent=1),
-                               trust=REP_PLACEHOLDER)
+                               trust=self.net.reputation(b.asker).value)
             attrs = (f'bounty_id="{b.bounty_id}" asker="{b.asker}" reward="{fmt_P(b.reward_mP)}" '
                      f'tags="{",".join(b.tags)}" commit_until="{b.commit_until}"')
         elif ev.kind == "judge_due":
@@ -295,7 +294,7 @@ class Node:
                 parts.append(f'<answer id="{a.answer_id}" author="{a.author}">\n'
                              + data_block(f"peer:{a.author}",
                                           json.dumps(body, ensure_ascii=False, indent=1),
-                                          trust=REP_PLACEHOLDER)
+                                          trust=self.net.reputation(a.author).value)
                              + "\n</answer>")
             inner = "\n".join(parts)
             attrs = (f'bounty_id="{b.bounty_id}" reward="{fmt_P(b.reward_mP)}" '
@@ -626,6 +625,10 @@ class Node:
         if url not in self._web_seen:
             raise BoardError(f"{url}은 이번 실행에서 fetch한 페이지가 아니다. 읽은 페이지만 출처로 쓸 수 있다.")
         return self._web_seen[url]
+
+    def _peer_reputations(self) -> str:
+        return ", ".join(f"{nid} {self.net.reputation(nid).value:.2f}"
+                         for nid in sorted(self.net.nodes) if nid != self.id) or "(없음)"
 
     def _notes_index(self) -> str:
         notes = self.memory.notes()

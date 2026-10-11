@@ -263,7 +263,7 @@ function renderState(s) {
       ${n.paused ? '<span class="chip bad">일시정지</span>' : ""}</div>
       <div class="persona">${esc(PERSONA[n.persona] || n.persona)} · ${esc(n.model)}</div>
       <div class="bal">${esc(n.balance)} <span class="persona">(잠김 ${esc(n.locked)})</span></div>
-      <div class="persona">예산 ${Math.round(100 * n.budget_remaining / n.budget_capacity)}% · 기억 ${n.memories}개</div>
+      <div class="persona">평판 <b>${n.reputation ?? "-"}</b> · 예산 ${Math.round(100 * n.budget_remaining / n.budget_capacity)}% · 기억 ${n.memories}개</div>
       <div class="recent">${esc(act)}</div></div>`;
   }).join("") || '<div class="empty">데이터 없음</div>';
   const bs = [...s.bounties].reverse();
