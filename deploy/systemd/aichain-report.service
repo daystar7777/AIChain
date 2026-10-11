@@ -1,0 +1,13 @@
+[Unit]
+Description=AIChain daily experiment report (read-only)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/aichain
+ExecStart=/opt/aichain/.venv/bin/python -m aichain.report --hours 24
+ExecStartPost=/opt/aichain/.venv/bin/python -m aichain.report --all
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/opt/aichain/data/reports /opt/aichain/data/journal /opt/aichain/data/knowledge

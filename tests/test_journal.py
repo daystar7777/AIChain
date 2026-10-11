@@ -167,3 +167,44 @@ def test_metrics_series_and_endpoint(tmp_path):
         def __init__(self, votes):
             self.votes = votes
     assert vote_agreement([P({"a": "yes", "b": "yes"}), P({"a": "yes", "b": "no"})]) == {"a-b": 0.5}
+
+
+def test_report_generation(tmp_path):
+    from aichain import report
+    from aichain import setup as node_setup
+    from aichain.gateways.web import FakeWebProvider, SearchGateway
+    from aichain.memory import KnowledgeStore
+    from aichain.sim.brains import research_brain
+
+    page = "https://example.org/py"
+    web = FakeWebProvider(results={"Python": [{"title": "t", "url": page, "snippet": "s"}]},
+                          pages={page: {"title": "Py", "text": "Python fact text"}})
+    jdb, kdb = tmp_path / "j.db", tmp_path / "k.db"
+    net = build_network("scripted", brain=research_brain, web=SearchGateway(web),
+                        knowledge=KnowledgeStore(kdb), interests=node_setup.DEFAULT_INTERESTS)
+    journal = Journal(jdb)
+    journal.start_run("t", {})
+    journal.attach(net)
+    net.research(["n2"])
+    net.run_until_idle()
+    net.bridge_question("n1", "t", **DEFAULT_QUESTION)
+    net.run_until_idle()
+    net.advance(SHORT_PARAMS.commit_blocks + SHORT_PARAMS.reveal_blocks + SHORT_PARAMS.judge_blocks + 2)
+    journal.close()
+    assert report.main(["--all", "--journal", str(jdb), "--knowledge", str(kdb), "--out", str(tmp_path / "r")]) == 0
+    md = next((tmp_path / "r").glob("*.md")).read_text()
+    assert "## 지식 체계" in md and "Python 개발" in md and "| n2 |" in md
+    assert "example.org 1" in md
+    html_text = next((tmp_path / "r").glob("*.html")).read_text()
+    assert "<table>" in html_text and "<h2>경제와 평판</h2>" in html_text
+
+
+def test_viewer_serves_reports(tmp_path):
+    rdir = tmp_path / "reports"
+    rdir.mkdir()
+    (rdir / "report-20261012-0010-24h.html").write_text("<h1>r</h1>")
+    client = TestClient(create_app(tmp_path / "j.db", reports_dir=rdir))
+    assert "report-20261012-0010-24h" in client.get("/reports").text
+    assert client.get("/reports/report-20261012-0010-24h.html").text == "<h1>r</h1>"
+    for bad in ("../j.db", "x.html", "report-x.sh"):
+        assert client.get(f"/reports/{bad}").status_code == 404

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Annotated, Any, AsyncIterator
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 from aichain.journal.store import connect
 
@@ -35,7 +35,7 @@ def _row(r: sqlite3.Row) -> dict[str, Any]:
 
 
 def create_app(db_path: Path, poll_seconds: float = 0.5, keepalive_seconds: float = 15.0,
-               knowledge_path: Path | None = None) -> FastAPI:
+               knowledge_path: Path | None = None, reports_dir: Path | None = None) -> FastAPI:
     app = FastAPI(title="AIChain Journal", version="0.0.1", docs_url=None, redoc_url=None)
 
     def db() -> sqlite3.Connection:
@@ -64,6 +64,25 @@ def create_app(db_path: Path, poll_seconds: float = 0.5, keepalive_seconds: floa
     @app.get("/")
     def index() -> FileResponse:
         return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/reports", response_class=HTMLResponse)
+    def reports_index() -> str:
+        files = sorted(reports_dir.glob("report-*.html"), reverse=True) if reports_dir and reports_dir.exists() else []
+        items = "".join(f'<li><a href="/reports/{f.name}">{f.stem}</a></li>' for f in files[:200])
+        return ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+                "<title>AIChain 리포트</title><body style='font-family:sans-serif;max-width:720px;margin:24px auto;"
+                "padding:0 16px'><h1>AIChain 리포트</h1><p><a href='/'>저널로</a></p><ul>"
+                + (items or "<li>아직 리포트가 없습니다</li>") + "</ul></body>")
+
+    @app.get("/reports/{name}")
+    def report_file(name: str) -> FileResponse:
+        if reports_dir is None or "/" in name or not name.startswith("report-") or not name.endswith((".html", ".md")):
+            raise HTTPException(404, "not found")
+        path = reports_dir / name
+        if not path.exists():
+            raise HTTPException(404, "not found")
+        return FileResponse(path, media_type="text/html; charset=utf-8" if name.endswith(".html")
+                            else "text/markdown; charset=utf-8")
 
     @app.get("/api/runs")
     def runs() -> list[dict[str, Any]]:
@@ -184,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="AIChain journal viewer (read-only)")
     ap.add_argument("--db", type=Path, default=DEFAULT_DB)
     ap.add_argument("--knowledge", type=Path, default=DEFAULT_KNOWLEDGE)
+    ap.add_argument("--reports", type=Path, default=Path("data/reports"))
     ap.add_argument("--host", action="append", default=None,
                     help="address to bind; repeat for several (default 127.0.0.1)")
     ap.add_argument("--port", type=int, default=8790)
@@ -203,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"refusing to bind {host}: use 127.0.0.1 or pass --allow-public", file=sys.stderr)
             return 2
     sockets = [_bind(h, args.port) for h in hosts]
-    config = uvicorn.Config(create_app(args.db, knowledge_path=args.knowledge), log_level="info")
+    config = uvicorn.Config(create_app(args.db, knowledge_path=args.knowledge, reports_dir=args.reports), log_level="info")
     uvicorn.Server(config).run(sockets=sockets)
     return 0
 
