@@ -22,7 +22,6 @@ from aichain.bridge.runtime import NetworkRuntime
 from aichain.bridge.server import create_app
 from aichain.bridge.tokens import DEFAULT_FILE, TokenStore
 from aichain import setup as node_setup
-from aichain.gateways.web import BrowserServiceProvider, SearchGateway
 from aichain.journal.store import Journal
 from aichain.memory import KnowledgeStore
 from aichain.sim.demo import make_workshop
@@ -31,8 +30,8 @@ from aichain.sim.factory import (
     SHORT_PARAMS,
     ConfigError,
     build_network,
-    default_browser_url,
     load_default_env,
+    make_web,
 )
 
 
@@ -68,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--nodes-file", type=Path, default=ROOT / "data" / "nodes.json")
     ap.add_argument("--daily-calls-per-node", type=int, default=50)
     ap.add_argument("--daily-calls-total", type=int, default=200)
+    ap.add_argument("--search-daily-cap", type=int, default=60,
+                    help="max Brave Search API queries per UTC day (paid)")
     ap.add_argument("--workshop", action="store_true",
                     help="let nodes define and version tools (execution stays disabled)")
     ap.add_argument("--workshop-exec", choices=["disabled", "systemd", "local-dev"], default="disabled",
@@ -93,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
                         if args.research else None)
             net = build_network(
                 args.provider, args.model, args.nomad_model, args.max_calls, params, trace=trace,
-                web=(SearchGateway(BrowserServiceProvider(args.browser or default_browser_url()))
+                web=(make_web(args.browser, args.search_daily_cap)
                      if args.research else None),
                 knowledge=KnowledgeStore(args.knowledge),
                 interests=node_setup.load(args.nodes_file),

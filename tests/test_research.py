@@ -344,3 +344,46 @@ def test_daily_caps_survive_restart(tmp_path):
     assert again.daily_usage() == {"a": 2, "*": 2}
     with pytest.raises(CallLimitReached):
         again.chat("x", req, 3)
+
+
+def test_brave_provider_caps_and_parses(tmp_path):
+    import httpx
+
+    from aichain.gateways.web import BraveSearchProvider, CompositeProvider
+
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"web": {"results": [
+            {"title": "What's New", "url": "https://docs.python.org/3/whatsnew/", "description": "<strong>New</strong> features"},
+            {"title": "bad", "url": "javascript:alert(1)", "description": ""}]}})
+
+    usage = str(tmp_path / "s.json")
+    brave = BraveSearchProvider("BSAtestkey" + "x" * 20, daily_cap=2, usage_path=usage, min_interval=0,
+                                client=httpx.Client(transport=httpx.MockTransport(handler)))
+    r = brave.search("python", 5)
+    assert r["engine"] == "brave-api" and r["results"] == [
+        {"title": "What's New", "url": "https://docs.python.org/3/whatsnew/", "snippet": "New features"}]
+    assert seen[0].headers["x-subscription-token"].startswith("BSAtestkey")
+    assert seen[0].url.params["q"] == "python" and seen[0].url.params["count"] == "5"
+    brave.search("again", 5)
+    with pytest.raises(WebError, match="daily cap"):
+        brave.search("third", 5)
+    # The cap survives a restart.
+    again = BraveSearchProvider("BSAtestkey" + "x" * 20, daily_cap=2, usage_path=usage,
+                                client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(WebError):
+        again.search("fourth", 5)
+    assert len(seen) == 2
+    web = FakeWebProvider(pages={PAGE: {"title": "t", "text": "body"}})
+    comp = CompositeProvider(search=brave, fetch=web)
+    assert comp.fetch(PAGE, 100)["text"] == "body"
+
+
+def test_brave_key_is_redacted():
+    from aichain.journal.store import REDACTED, redact
+
+    key = "BSA" + "Ab3" * 10
+    assert key not in str(redact({"note": f"key {key}", "env": f"BRAVE_SEARCH_API_KEY={key}"}))
+    assert redact({"x": f"BRAVE_ANSWER_API_KEY=abc123"})["x"].endswith(REDACTED)

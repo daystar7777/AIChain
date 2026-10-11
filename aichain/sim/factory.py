@@ -30,6 +30,20 @@ class ConfigError(Exception):
     pass
 
 
+def make_web(browser_url: str | None, search_daily_cap: int = 60) -> "SearchGateway":
+    """Brave Search API for search when BRAVE_SEARCH_API_KEY is set (paid, capped per day);
+    the isolated headless browser for reading pages (and as the search fallback)."""
+    from aichain.gateways.web import BraveSearchProvider, BrowserServiceProvider, CompositeProvider
+
+    browser = BrowserServiceProvider(browser_url or default_browser_url())
+    key = os.environ.get("BRAVE_SEARCH_API_KEY", "")
+    if not key:
+        return SearchGateway(browser)
+    brave = BraveSearchProvider(key, daily_cap=search_daily_cap,
+                                usage_path=str(ROOT / "data" / "search_usage.json"))
+    return SearchGateway(CompositeProvider(search=brave, fetch=browser))
+
+
 def default_browser_url() -> str:
     """The server's isolated browser service if installed, else a local dev instance."""
     return f"unix:{BROWSER_SOCKET}" if BROWSER_SOCKET.exists() else "http://127.0.0.1:8781"

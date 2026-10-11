@@ -4,6 +4,7 @@ the headless browser service.
 
 from __future__ import annotations
 
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -56,7 +57,7 @@ class BrowserServiceProvider:
 
 @dataclass
 class WebLimits:
-    search_per_hour: int = 20
+    search_per_hour: int = 6  # paid search API: keep it small
     fetch_per_hour: int = 40
     search_ttl: float = 3600
     fetch_ttl: float = 86400
@@ -129,3 +130,90 @@ class FakeWebProvider:
         return {"url": url, "final_url": url, "title": page.get("title", ""), "text": text,
                 "chars": len(text), "fetched_at": "2026-10-11T00:00:00+00:00", "elapsed_ms": 1,
                 "status": 200, "blocked_requests": []}
+
+
+class BraveSearchProvider:
+    """Brave Search API (paid per query): web search only. Pages are still read by the
+    isolated browser. A daily cap persisted on disk keeps spend bounded across restarts."""
+
+    URL = "https://api.search.brave.com/res/v1/web/search"
+
+    def __init__(self, api_key: str, daily_cap: int = 60, usage_path: str | None = None,
+                 min_interval: float = 1.1, client: httpx.Client | None = None,
+                 clock: Callable[[], float] = time.time) -> None:
+        if not api_key:
+            raise ValueError("BRAVE_SEARCH_API_KEY is empty")
+        self._key = api_key
+        self.daily_cap = daily_cap
+        self.usage_path = usage_path
+        self.min_interval = min_interval
+        self._client = client or httpx.Client(timeout=20)
+        self._clock = clock
+        self._last = 0.0
+        self._day, self.used_today = self._load()
+
+    def _today(self) -> str:
+        return time.strftime("%Y-%m-%d", time.gmtime(self._clock()))
+
+    def _load(self) -> tuple[str, int]:
+        import json
+        import os
+
+        if self.usage_path and os.path.exists(self.usage_path):
+            with open(self.usage_path, encoding="utf-8") as f:
+                raw = json.load(f)
+            if raw.get("day") == self._today():
+                return raw["day"], int(raw.get("count", 0))
+        return self._today(), 0
+
+    def _save(self) -> None:
+        import json
+        import os
+
+        if self.usage_path:
+            tmp = self.usage_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"day": self._day, "count": self.used_today}, f)
+            os.replace(tmp, self.usage_path)
+
+    def search(self, query: str, k: int) -> dict[str, Any]:
+        if self._today() != self._day:
+            self._day, self.used_today = self._today(), 0
+        if self.used_today >= self.daily_cap:
+            raise WebError(f"Brave search daily cap {self.daily_cap} reached (resets 00:00 UTC)")
+        wait = self.min_interval - (self._clock() - self._last)
+        if wait > 0:
+            time.sleep(wait)
+        self._last = self._clock()
+        started = time.monotonic()
+        self.used_today += 1  # count before the call: a failed request may still be billed
+        self._save()
+        try:
+            r = self._client.get(self.URL, params={"q": query, "count": k},
+                                 headers={"X-Subscription-Token": self._key,
+                                          "Accept": "application/json"})
+        except httpx.HTTPError as e:
+            raise WebError(f"Brave search unreachable: {e!r}") from e
+        if r.status_code >= 400:
+            raise WebError(f"Brave search HTTP {r.status_code}: {r.text[:200]}",
+                           blocked=r.status_code in (401, 403, 429))
+        hits = (r.json().get("web") or {}).get("results") or []
+        results = [{"title": h.get("title", ""), "url": h.get("url", ""),
+                    "snippet": re.sub(r"<[^>]+>", "", h.get("description", ""))}
+                   for h in hits[:k] if h.get("url", "").startswith(("http://", "https://"))]
+        return {"query": query, "results": results, "engine": "brave-api",
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "used_today": self.used_today, "daily_cap": self.daily_cap}
+
+
+class CompositeProvider:
+    """Search from one provider (e.g. Brave API), fetch from another (the isolated browser)."""
+
+    def __init__(self, search: WebProvider, fetch: WebProvider) -> None:
+        self._search, self._fetch = search, fetch
+
+    def search(self, query: str, k: int) -> dict[str, Any]:
+        return self._search.search(query, k)
+
+    def fetch(self, url: str, max_chars: int) -> dict[str, Any]:
+        return self._fetch.fetch(url, max_chars)

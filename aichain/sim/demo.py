@@ -16,7 +16,6 @@ from pathlib import Path
 
 from aichain.common import fmt_P
 from aichain import setup as node_setup
-from aichain.gateways.web import BrowserServiceProvider, SearchGateway
 from aichain.journal.store import Journal
 from aichain.memory import KnowledgeStore
 from aichain.workshop.executor import DisabledExecutor, LocalDevExecutor, SystemdExecutor
@@ -26,8 +25,8 @@ from aichain.sim.factory import (
     SHORT_PARAMS,
     ConfigError,
     build_network,
-    default_browser_url,
     load_default_env,
+    make_web,
 )
 
 DEFAULT_QUESTION = {
@@ -70,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="interests from `python -m aichain.setup`")
     ap.add_argument("--daily-calls-per-node", type=int, default=50)
     ap.add_argument("--daily-calls-total", type=int, default=200)
+    ap.add_argument("--search-daily-cap", type=int, default=60,
+                    help="max Brave Search API queries per UTC day (paid)")
     ap.add_argument("--workshop", action="store_true",
                     help="let nodes define and version tools (execution stays disabled)")
     ap.add_argument("--workshop-exec", choices=["disabled", "systemd", "local-dev"], default="disabled",
@@ -86,8 +87,8 @@ def main(argv: list[str] | None = None) -> int:
     params = SHORT_PARAMS
     with trace_path.open("w", encoding="utf-8") as trace:
         try:
-            web = None if args.no_web or args.scenario == "bounty" else SearchGateway(
-                BrowserServiceProvider(args.browser or default_browser_url()))
+            web = None if args.no_web or args.scenario == "bounty" else make_web(
+                args.browser, args.search_daily_cap)
             knowledge = KnowledgeStore(args.knowledge) if args.scenario != "bounty" else None
             net = build_network(args.provider, args.model, args.nomad_model, max_calls, params,
                                 trace=trace, echo=not args.quiet, web=web, knowledge=knowledge,

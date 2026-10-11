@@ -51,8 +51,9 @@ _SECRET_KEYS = re.compile(r"(authorization|api[_-]?key|secret|password|passwd|to
 _SECRET_VALUES = [
     re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}"),  # OpenAI-style keys (OpenCode Go uses these)
     re.compile(r"\bacb_[A-Za-z0-9_\-]{16,}"),  # Bridge client tokens
+    re.compile(r"\bBSA[A-Za-z0-9_\-]{20,}"),  # Brave Search API keys
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/\-]{8,}=*"),
-    re.compile(r"(?i)(OPENCODE_GO_API_KEY\s*=\s*)\S+"),
+    re.compile(r"(?i)((?:OPENCODE_GO|BRAVE_SEARCH|BRAVE_ANSWER)_API_KEY\s*=\s*)\S+"),
 ]
 # Token counters are not secrets.
 _ALLOWED_KEYS = {"input_tokens", "output_tokens", "weighted_tokens", "tokens", "max_output_tokens",
