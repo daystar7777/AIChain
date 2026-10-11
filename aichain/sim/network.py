@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, TextIO
+from typing import Any, Callable, TextIO
 
 from aichain.board import Board, BoardEvent, Params
 from aichain.content import ContentStore
@@ -30,6 +30,8 @@ class Network:
         self.episodes: list[EpisodeResult] = []
         self._trace = trace
         self._echo = echo
+        # Called with every log entry (the Bridge follows question lifecycles this way).
+        self.listeners: list[Callable[[dict[str, Any]], None]] = []
 
     def clock_minutes(self) -> float:
         return self.board.height * SECONDS_PER_BLOCK / 60
@@ -42,6 +44,8 @@ class Network:
             self._trace.write(line + "\n")
         if self._echo:
             print(line, file=sys.stdout, flush=True)
+        for listener in self.listeners:
+            listener(entry)
 
     def add_node(self, cfg: NodeConfig, grant_mP: int = 1_000_000) -> Node:
         node = Node(cfg, self)
@@ -57,10 +61,14 @@ class Network:
     # ---- routing ----
 
     def bridge_question(self, node_id: str, client: str, title: str, body: str,
-                        acceptance_criteria: str) -> None:
+                        acceptance_criteria: str, **extra: Any) -> None:
+        """extra: ref, max_reward_P, deadline_minutes (set by the Bridge API)."""
         self.nodes[node_id].enqueue("bridge_question", {
             "client": client, "title": title, "body": body,
-            "acceptance_criteria": acceptance_criteria})
+            "acceptance_criteria": acceptance_criteria, **extra})
+
+    def link_question(self, ref: str, bounty_id: str) -> None:
+        self.log("core", "bridge_linked", ref=ref, bounty_id=bounty_id)
 
     def announce_bounty(self, bounty_id: str) -> None:
         b = self.board.bounty(bounty_id)

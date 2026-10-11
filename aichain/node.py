@@ -109,6 +109,7 @@ class Node:
         self._seq = itertools.count()
         # answer_id -> (body, salt): kept locally until the Core reveals it.
         self._sealed: dict[str, tuple[dict[str, Any], str]] = {}
+        self.current_event: QueuedEvent | None = None
 
     # ---- events ----
 
@@ -208,6 +209,10 @@ class Node:
             q = {k: p[k] for k in ("title", "body", "acceptance_criteria")}
             inner = data_block(f"bridge:{p['client']}", json.dumps(q, ensure_ascii=False, indent=1))
             attrs = f'client="{escape_data(p["client"])}"'
+            if p.get("max_reward_P") is not None:
+                attrs += f' max_reward="{p["max_reward_P"]}P"'
+            if p.get("deadline_minutes") is not None:
+                attrs += f' deadline_minutes="{p["deadline_minutes"]}"'
         elif ev.kind == "bounty_new":
             b = board.bounty(p["bounty_id"])
             q = self.net.content.get(b.question_hash)
@@ -240,13 +245,15 @@ class Node:
     def run_episode(self, ev: QueuedEvent) -> EpisodeResult:
         cfg = self.cfg
         self.policy.start_episode()
+        self.current_event = ev
+        ref = {"ref": ev.payload["ref"]} if "ref" in ev.payload else {}
         event_text = self.render_event(ev)
         messages = self._system_messages(event_text) + [Message("user", event_text)]
         tools = tool_specs()
         steps = calls = tokens = 0
         summary: str | None = None
         stopped = "max_steps"
-        self.net.log(self.id, "episode_start", kind=ev.kind)
+        self.net.log(self.id, "episode_start", kind=ev.kind, **ref)
         while steps < cfg.max_steps:
             request = LLMRequest(self.id, cfg.model, messages, tools, cfg.temperature,
                                  cfg.max_output_tokens)
@@ -289,9 +296,10 @@ class Node:
                 break
         self.memory.remember(self.net.board.height, "episode", "self", 1.0,
                              f"[{ev.kind}] {summary or '(요약 없음)'}")
+        self.current_event = None
         result = EpisodeResult(self.id, ev.kind, steps, calls, tokens, summary, stopped)
         self.net.log(self.id, "episode_end", kind=ev.kind, steps=steps, llm_calls=calls,
-                     tokens=tokens, stopped=stopped, summary=summary)
+                     tokens=tokens, stopped=stopped, summary=summary, **ref)
         return result
 
     # ---- tool execution (Core) ----
@@ -344,10 +352,15 @@ class Node:
             return f"기억 #{rec.seq} 기록됨"
         if isinstance(args, AskArgs):
             reward = to_mP(args.reward_P)
+            ctx = self.current_event.payload if self.current_event else {}
+            if ctx.get("max_reward_P") is not None and reward > to_mP(ctx["max_reward_P"]):
+                raise BoardError(f"reward exceeds the client's max_reward {ctx['max_reward_P']}P")
             self.policy.check_spend(reward, acct.available_mP, h, bounty=True)
             q_hash = self.net.put_content(args.question.model_dump(), author=self.id)
             b = board.create_bounty(self.id, q_hash, reward, args.tags, args.max_answers)
             self.policy.record_write(reward, h)
+            if "ref" in ctx:
+                self.net.link_question(ctx["ref"], b.bounty_id)
             self.net.announce_bounty(b.bounty_id)
             return (f"현상금 생성: bounty_id={b.bounty_id}, 현상금 {fmt_P(reward)} 잠김, "
                     f"커밋 마감 블록 {b.commit_until}, 판정 마감 블록 {b.judge_until}")

@@ -107,6 +107,32 @@ uv run python -m aichain.sim.demo --provider opencode-go --max-calls 10
 
 Or with Docker: `docker compose -f deploy/docker-compose.yml run --rm sim`. Each run writes a JSONL trace to `data/`.
 
+### Bridge API
+
+The network can also run continuously behind the Bridge API ([04 Node runtime, ch. 7](docs/design/04-node-runtime.md)): REST for actions, Server-Sent Events for live updates, a Bearer token per client. It binds to `127.0.0.1` only unless `--allow-public` is given.
+
+```bash
+uv run python -m aichain.bridge.tokens new my-client     # prints the token once; only its hash is stored
+uv run python -m aichain.bridge                         # scripted model on 127.0.0.1:8780
+uv run python -m aichain.bridge --provider opencode-go --max-calls 40
+```
+
+| Method | Path | |
+|---|---|---|
+| POST | `/bridge/v1/questions` | `{title, body, acceptance_criteria, max_reward_P?, deadline_minutes?}` → `{ref, ...}` |
+| GET | `/bridge/v1/questions/{ref}` | status, bounty, and the answers once settled |
+| GET | `/bridge/v1/questions/{ref}/events` | SSE: `queued → processing → bounty_open → answer_committed → revealing → judging → settled` (or `no_bounty` / `failed`); supports `Last-Event-ID` |
+| GET | `/bridge/v1/network` | public stats: height, nodes, balances, recent bounties |
+
+```bash
+curl -s -X POST localhost:8780/bridge/v1/questions -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"...","body":"...","acceptance_criteria":"..."}'
+curl -N localhost:8780/bridge/v1/questions/$REF/events -H "Authorization: Bearer $TOKEN"
+```
+
+The receiving node (n1) decides by itself whether to post a bounty; `max_reward_P` is enforced by Core.
+
 ## Vision
 
 The long-term motivation is to explore what infrastructure future, more capable AI systems might use to cooperate. The near-term rule is simpler: **build something today's LLM agents would actually use.**

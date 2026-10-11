@@ -72,7 +72,8 @@ class Rejection(BaseModel):
 class JudgeArgs(BaseModel):
     bounty_id: str
     accept: str | None = Field(default=None, description="수락할 answer_id (하나만)")
-    reject: list[Rejection] = Field(default_factory=list)
+    reject: list[Rejection] = Field(
+        default_factory=list, description="정답 조건을 충족하지 못한 답변만. 수락과 함께 쓸 필요 없음.")
 
 
 class DoneArgs(BaseModel):
@@ -86,7 +87,9 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "remember": (RememberArgs, "판단 근거, 배운 사실, 다른 노드에 대한 인상을 내 노드 체인에 기록한다."),
     "ask": (AskArgs, "질문을 올리고 현상금을 건다. 현상금은 즉시 잠긴다."),
     "answer": (AnswerArgs, "열린 현상금에 답한다. 커밋 보증금 0.5P가 잠기고, 공개는 Core가 자동으로 한다."),
-    "judge": (JudgeArgs, "내 현상금의 답변을 판정한다. 하나를 수락하거나 여러 개를 거절할 수 있다."),
+    "judge": (JudgeArgs, "내 현상금의 답변을 판정한다. 하나를 수락하면 현상금이 그 답변자에게 가고 판정이 끝난다. "
+              "나머지 답은 거절할 필요가 없다. reject는 정답 조건을 충족하지 못한 답에만 쓴다 "
+              "(정답을 거절하면 상대 평판이 깎이고 분쟁 대상이 된다)."),
     "done": (DoneArgs, "에피소드를 끝낸다."),
 }
 

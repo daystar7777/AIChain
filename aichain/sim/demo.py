@@ -10,45 +10,12 @@ others answer per their persona; the board runs commit → reveal → judge → 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
 
-from aichain.board import Params
 from aichain.common import fmt_P
-from aichain.gateways.llm.base import GatewayConfig, LLMGateway, ProviderAdapter
-from aichain.gateways.llm.opencode_go import DEFAULT_MODEL, OpenCodeGoAdapter
-from aichain.gateways.llm.scripted import ScriptedAdapter
-from aichain.node import NodeConfig
-from aichain.sim.brains import persona_brain
-from aichain.sim.network import Network
-
-ROOT = Path(__file__).resolve().parents[2]
-
-
-def load_env(path: Path) -> None:
-    """Minimal .env loader (KEY=VALUE lines); existing environment wins."""
-    if not path.exists():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
-
-def default_nodes(provider: str, model: str, nomad_model: str | None) -> list[NodeConfig]:
-    return [
-        NodeConfig("n1", "seeker", provider, model, tags_interest=[]),
-        NodeConfig("n2", "artisan", provider, model, tags_interest=["code", "python", "debugging"]),
-        # Warden reviews settled bounties rather than answering; no bounty_new wake-ups (saves calls).
-        NodeConfig("n3", "warden", provider, model, tags_interest=[]),
-        NodeConfig("n4", "nomad", provider, nomad_model or model, temperature=0.7,
-                   tags_interest=["*"]),
-    ]
-
+from aichain.sim.factory import ROOT, SHORT_PARAMS, ConfigError, build_network, load_default_env
 
 DEFAULT_QUESTION = {
     "title": "Python 리스트를 제자리에서 뒤집는 방법",
@@ -70,32 +37,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
-    # Working directory first (e.g. /opt/aichain on the server), then the repo root.
-    load_env(Path.cwd() / ".env")
-    load_env(ROOT / ".env")
-    adapters: dict[str, ProviderAdapter] = {}
-    if args.provider == "scripted":
-        adapters["scripted"] = ScriptedAdapter(persona_brain)
-        model = args.model or "scripted"
-        max_calls = args.max_calls
-    else:
-        key = os.environ.get("OPENCODE_GO_API_KEY", "")
-        if not key:
-            print("OPENCODE_GO_API_KEY is not set. Put it in .env (see .env.example).", file=sys.stderr)
-            return 2
-        adapters["opencode-go"] = OpenCodeGoAdapter(key)
-        model = args.model or DEFAULT_MODEL
-        max_calls = args.max_calls if args.max_calls is not None else 10
-
+    load_default_env()
+    max_calls = args.max_calls
+    if max_calls is None and args.provider == "opencode-go":
+        max_calls = 10
     trace_path = args.trace or ROOT / "data" / f"trace-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
     trace_path.parent.mkdir(parents=True, exist_ok=True)
-    gateway = LLMGateway(adapters, GatewayConfig(max_calls=max_calls))
-    # Short periods so one cycle takes a few hundred virtual blocks.
-    params = Params(commit_blocks=24, reveal_blocks=12, judge_blocks=48, dispute_blocks=120)
+    params = SHORT_PARAMS
     with trace_path.open("w", encoding="utf-8") as trace:
-        net = Network(gateway, params, trace=trace, echo=not args.quiet)
-        for cfg in default_nodes(args.provider, model, args.nomad_model):
-            net.add_node(cfg)
+        try:
+            net = build_network(args.provider, args.model, args.nomad_model, max_calls, params,
+                                trace=trace, echo=not args.quiet)
+        except ConfigError as e:
+            print(e, file=sys.stderr)
+            return 2
         net.bridge_question("n1", "demo", **DEFAULT_QUESTION)
         net.run_until_idle()
         net.advance(params.commit_blocks + params.reveal_blocks + params.judge_blocks
@@ -111,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     for nid, a in net.board.accounts.items():
         print(f"{nid}: balance {fmt_P(a.balance_mP)} locked {fmt_P(a.locked_mP)}")
     print(f"burned {fmt_P(net.board.burned_mP)}, supply check: {net.board.total_supply_check()}")
-    print(f"LLM calls: {gateway.calls}, episodes: {len(net.episodes)}, trace: {trace_path}")
+    print(f"LLM calls: {net.gateway.calls}, episodes: {len(net.episodes)}, trace: {trace_path}")
     return 0
 
 

@@ -7,7 +7,8 @@ from aichain.gateways.llm.scripted import ScriptedAdapter, tool_response
 from aichain.mastermind.tools import tool_specs
 from aichain.node import NodeConfig
 from aichain.sim.brains import lazy_asker_brain, persona_brain
-from aichain.sim.demo import DEFAULT_QUESTION, default_nodes
+from aichain.sim.demo import DEFAULT_QUESTION
+from aichain.sim.factory import default_nodes
 from aichain.sim.network import Network
 
 PARAMS = Params(commit_blocks=24, reveal_blocks=12, judge_blocks=48, dispute_blocks=120)

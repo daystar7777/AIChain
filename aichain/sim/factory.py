@@ -1,0 +1,82 @@
+"""Builds the four-node prototype network; shared by the demo CLI and the Bridge server."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import TextIO
+
+from aichain.board import Params
+from aichain.gateways.llm.base import GatewayConfig, LLMGateway, ProviderAdapter
+from aichain.gateways.llm.opencode_go import DEFAULT_MODEL, OpenCodeGoAdapter
+from aichain.gateways.llm.scripted import Brain, ScriptedAdapter
+from aichain.node import NodeConfig
+from aichain.sim.brains import persona_brain
+from aichain.sim.network import Network
+
+ROOT = Path(__file__).resolve().parents[2]
+
+# Short periods so one cycle takes a few hundred blocks instead of hours.
+SHORT_PARAMS = Params(commit_blocks=24, reveal_blocks=12, judge_blocks=48, dispute_blocks=120)
+
+
+class ConfigError(Exception):
+    pass
+
+
+def load_env(path: Path) -> None:
+    """Minimal .env loader (KEY=VALUE lines); existing environment wins."""
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def load_default_env() -> None:
+    # Working directory first (e.g. /opt/aichain on the server), then the repo root.
+    load_env(Path.cwd() / ".env")
+    load_env(ROOT / ".env")
+
+
+def default_nodes(provider: str, model: str, nomad_model: str | None) -> list[NodeConfig]:
+    return [
+        NodeConfig("n1", "seeker", provider, model, tags_interest=[]),
+        NodeConfig("n2", "artisan", provider, model, tags_interest=["code", "python", "debugging"]),
+        # Warden reviews settled bounties rather than answering; no bounty_new wake-ups (saves calls).
+        NodeConfig("n3", "warden", provider, model, tags_interest=[]),
+        NodeConfig("n4", "nomad", provider, nomad_model or model, temperature=0.7,
+                   tags_interest=["*"]),
+    ]
+
+
+def build_network(
+    provider: str = "scripted",
+    model: str | None = None,
+    nomad_model: str | None = None,
+    max_calls: int | None = None,
+    params: Params | None = None,
+    trace: TextIO | None = None,
+    echo: bool = False,
+    brain: Brain = persona_brain,
+) -> Network:
+    adapters: dict[str, ProviderAdapter] = {}
+    if provider == "scripted":
+        adapters["scripted"] = ScriptedAdapter(brain)
+        model = model or "scripted"
+    elif provider == "opencode-go":
+        key = os.environ.get("OPENCODE_GO_API_KEY", "")
+        if not key:
+            raise ConfigError("OPENCODE_GO_API_KEY is not set. Put it in .env (see .env.example).")
+        adapters["opencode-go"] = OpenCodeGoAdapter(key)
+        model = model or DEFAULT_MODEL
+    else:
+        raise ConfigError(f"unknown provider {provider}")
+    gateway = LLMGateway(adapters, GatewayConfig(max_calls=max_calls))
+    net = Network(gateway, params or SHORT_PARAMS, trace=trace, echo=echo)
+    for cfg in default_nodes(provider, model, nomad_model):
+        net.add_node(cfg)
+    return net
