@@ -87,3 +87,37 @@ def persona_brain(request: LLMRequest, *, judge: bool = True) -> LLMResponse:
 def lazy_asker_brain(request: LLMRequest) -> LLMResponse:
     """Like persona_brain, but never judges — exercises AUTO_SPLIT."""
     return persona_brain(request, judge=False)
+
+
+_URL = re.compile(r"^\s+(https?://\S+)$", re.M)
+
+
+def research_brain(request: LLMRequest) -> LLMResponse:
+    """Plays a research episode: search → fetch the first result → remember → note → done."""
+    kind, _, text = event_of(request)
+    if kind != "research_tick":
+        return persona_brain(request)
+    tool_msgs = [m for m in request.messages if m.role == "tool"]
+    topic = re.search(r"## 관심사\n- ([^:]+):", text)
+    topic = topic.group(1).strip() if topic else "주제"
+    if not tool_msgs:
+        return tool_response(("search", {"query": f"{topic} 최신", "k": 3}))
+    last = tool_msgs[-1]
+    if last.name == "search":
+        urls = _URL.findall(html.unescape(last.content or ""))
+        if not urls:
+            return tool_response(("done", {"summary": "검색 결과 없음"}))
+        return tool_response(("fetch", {"url": urls[0], "max_chars": 2000}))
+    if last.name == "fetch":
+        m = re.search(r'<data source="web:([^"]+)"', last.content or "")
+        url = html.unescape(m.group(1)) if m else ""
+        body = html.unescape((last.content or "").split("\n\n", 1)[-1])[:80]
+        return tool_response(
+            ("remember", {"kind": "fact", "content": f"{topic}: {body}", "tags": [topic],
+                          "source_url": url}),
+            ("note", {"topic": topic, "summary": f"{topic}에 대해 읽은 내용 요약", "confidence": 0.5,
+                      "facts": [{"text": body, "source_url": url}],
+                      "open_questions": ["더 최신 자료 확인"]}),
+            ("done", {"summary": f"{topic} 연구 노트를 갱신했다."}),
+        )
+    return tool_response(("done", {"summary": "연구 종료"}))

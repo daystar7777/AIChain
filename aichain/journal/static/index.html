@@ -80,6 +80,13 @@ pre { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-bre
   background: var(--bg); border-radius: 6px; padding: 8px; max-height: 420px; overflow: auto; }
 .msg-role { font-size: 12px; color: var(--muted); }
 details > summary { cursor: pointer; }
+.ktabs button { font-size: 12px; padding: 1px 8px; margin-left: 4px; }
+.ktabs button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.note { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+.note .topic { font-weight: 600; }
+.note ul { margin: 4px 0; padding-left: 18px; font-size: 13px; }
+.note a, .fact a { color: var(--accent); word-break: break-all; }
+.fact { font-size: 12px; border-left: 3px solid var(--line); padding: 2px 8px; margin: 4px 0; }
 </style>
 </head>
 <body>
@@ -96,6 +103,7 @@ details > summary { cursor: pointer; }
   <div>
     <section><h2>노드</h2><div id="nodes" class="nodes"><div class="empty">데이터 없음</div></div></section>
     <section><h2>현상금 보드</h2><div id="bounties"><div class="empty">현상금 없음</div></div></section>
+    <section><h2>지식 <span id="kTabs" class="ktabs"></span></h2><div id="knowledge"><div class="empty">지식 노트 없음</div></div></section>
   </div>
   <div>
     <section>
@@ -110,6 +118,7 @@ details > summary { cursor: pointer; }
           <option value="bounty">현상금·정산</option>
           <option value="money">잔액 변화</option>
           <option value="memory">기억</option>
+          <option value="web">웹 검색·지식</option>
           <option value="problem">거부·오류</option>
         </select></label>
         <label><input type="checkbox" id="follow" checked> 자동 스크롤</label>
@@ -129,6 +138,8 @@ const KIND = {
   judge_due: ["판정 단계", "warn"], bounty_settled: ["정산", "ok"], bounty_final: ["확정", "ok"],
   balance: ["잔액 변화", ""], memory: ["기억", ""], budget_state: ["예산 상태", "warn"],
   skip_event: ["이벤트 건너뜀", "warn"], runtime_error: ["오류", "bad"], bridge_linked: ["브릿지 연결", ""],
+  web_search: ["웹 검색", "llm"], web_fetch: ["페이지 읽기", "llm"], web_error: ["웹 오류", "bad"],
+  knowledge: ["지식 노트", "ok"],
 };
 const GROUPS = {
   core: k => k !== "llm_call" && k !== "llm_text",
@@ -137,8 +148,9 @@ const GROUPS = {
   bounty: k => ["reveal_open", "judge_due", "bounty_settled", "bounty_final", "duty_reveal", "bridge_linked"].includes(k)
     || k === "tool",
   money: k => k === "balance",
-  memory: k => k === "memory",
-  problem: k => ["tool_invalid", "policy_reject", "board_reject", "runtime_error", "skip_event"].includes(k),
+  memory: k => k === "memory" || k === "knowledge",
+  web: k => ["web_search", "web_fetch", "web_error", "knowledge"].includes(k),
+  problem: k => ["tool_invalid", "policy_reject", "board_reject", "runtime_error", "skip_event", "web_error"].includes(k),
 };
 const PERSONA = { seeker: "Seeker · 질문자", artisan: "Artisan · 전문가", warden: "Warden · 감시자", nomad: "Nomad · 범용" };
 const STAGES = ["OPEN", "REVEAL", "JUDGING", "SETTLED", "FINAL"];
@@ -176,6 +188,10 @@ function describe(e) {
     case "memory": return `[${esc(d.kind)}] ${esc(d.source)}: ${esc(short(d.content))}`;
     case "budget_state": return `${esc(d.old)} → <b>${esc(d.new)}</b> (남은 ${d.remaining})`;
     case "skip_event": return `${esc(d.kind)} — ${esc(d.reason)}`;
+    case "web_search": return `"${esc(d.query)}" → 결과 ${d.results}개${d.cached ? " (캐시)" : ""} · ${d.elapsed_ms ?? "-"}ms`;
+    case "web_fetch": return `${esc(short(d.title || "", 60))} <span class="meta">${esc(short(d.url, 90))}</span> · ${d.chars}자 · ${d.elapsed_ms ?? "-"}ms${d.blocked_requests ? ` · 차단된 하위요청 ${d.blocked_requests}` : ""}`;
+    case "web_error": return `<b>${esc(d.tool)}</b> ${d.blocked ? "[차단] " : ""}${esc(short(d.error))}`;
+    case "knowledge": return `<b>${esc(d.topic)}</b> v${d.version} · 사실 ${d.facts}개 · 확신 ${d.confidence}`;
     default: return esc(short(JSON.stringify(d), 200));
   }
 }
@@ -309,6 +325,31 @@ async function openEpisode(ep) {
   $("dlg").showModal();
 }
 
+let kNode = null, kData = {};
+const safeUrl = u => /^https?:\/\//i.test(u || "") ? u : null;
+const link = u => safeUrl(u) ? `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer nofollow">${esc(short(u, 80))}</a>` : esc(u);
+
+async function loadKnowledge() {
+  const r = await fetch("/api/knowledge");
+  if (!r.ok) return;
+  kData = (await r.json()).nodes || {};
+  const ids = Object.keys(kData).sort();
+  if (!ids.length) { $("knowledge").innerHTML = '<div class="empty">지식 노트 없음</div>'; $("kTabs").innerHTML = ""; return; }
+  if (!kNode || !kData[kNode]) kNode = ids[0];
+  $("kTabs").innerHTML = ids.map(n => `<button class="${n === kNode ? "on" : ""}" data-n="${esc(n)}">${esc(n)}</button>`).join("");
+  $("kTabs").querySelectorAll("button").forEach(b => b.onclick = () => { kNode = b.dataset.n; loadKnowledge(); });
+  const k = kData[kNode];
+  const notes = k.notes.map(n => `<div class="note"><div class="topic">${esc(n.topic)} <span class="chip">v${n.version}</span>
+      <span class="chip">확신 ${esc(n.confidence)}</span></div>
+      <div class="meta">블록 #${n.height} · ${new Date(n.ts * 1000).toLocaleString("ko-KR", { hour12: false })}</div>
+      <div>${esc(n.summary)}</div>
+      ${(n.facts || []).length ? `<ul>${n.facts.map(f => `<li>${esc(f.text)}<br>${link(f.source_url)}</li>`).join("")}</ul>` : ""}
+      ${(n.open_questions || []).length ? `<div class="meta">더 알아볼 것: ${n.open_questions.map(esc).join(" · ")}</div>` : ""}</div>`).join("");
+  const facts = k.facts.length ? `<details><summary class="meta">최근 웹 사실 ${k.facts.length}개</summary>${k.facts.map(f =>
+      `<div class="fact">${esc(f.content)}<br>${link(f.url)}</div>`).join("")}</details>` : "";
+  $("knowledge").innerHTML = `<div class="meta">기억 ${k.memories}개 · 노트 ${k.notes.length}개</div>` + (notes || '<div class="empty">노트 없음</div>') + facts;
+}
+
 function prettyArgs(a) { try { return JSON.stringify(JSON.parse(a), null, 1); } catch { return a; } }
 
 function setLive(on, text) { $("dot").className = "dot" + (on ? " on" : ""); $("live").textContent = text; }
@@ -351,6 +392,7 @@ $("dlgClose").onclick = () => $("dlg").close();
   const runs = await loadRuns();
   if (runs.length) selectRun(runs[0].id); else $("timeline").innerHTML = '<div class="empty">기록된 실행이 없습니다</div>';
   setInterval(loadRuns, 10000);
+  loadKnowledge(); setInterval(loadKnowledge, 10000);
 })();
 </script>
 </body>

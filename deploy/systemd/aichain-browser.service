@@ -1,0 +1,35 @@
+# Headless Chromium for search/fetch. Runs in a private network namespace (no interfaces
+# but its own loopback): the only way out is the egress proxy's Unix socket. It cannot
+# read keys, .env, the journal or the knowledge DB.
+[Unit]
+Description=AIChain headless browser (search/fetch)
+After=aichain-egress.service
+Requires=aichain-egress.service
+
+[Service]
+User=aichain-browser
+Group=aichain-browser
+SupplementaryGroups=aichain-net
+RuntimeDirectory=aichain-browser
+RuntimeDirectoryMode=0750
+StateDirectory=aichain-browser
+Environment=HOME=/var/lib/aichain-browser
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/aichain-browser/ms-playwright
+ExecStart=/opt/aichain/.venv/bin/python -m aichain.browser.service --uds /run/aichain-browser/browser.sock --egress-uds /run/aichain-egress/egress.sock
+Restart=on-failure
+RestartSec=5
+PrivateNetwork=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+InaccessiblePaths=/opt/aichain/.env /opt/aichain/data
+MemoryMax=2G
+TasksMax=512
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

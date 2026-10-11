@@ -166,6 +166,8 @@ class GatewayConfig:
     output_weight: float = 2.0  # output token cost relative to input (Muse Spark: 0.2 / 0.1)
     max_retries: int = 5
     max_calls: int | None = None  # hard cap on total provider calls (smoke tests)
+    daily_calls_per_node: int | None = None  # per UTC day
+    daily_calls_total: int | None = None  # per UTC day, all nodes
 
 
 class LLMGateway:
@@ -187,6 +189,7 @@ class LLMGateway:
         self._sleep = sleep
         self._rng = rng or random.Random(0)
         self.calls = 0
+        self._daily: dict[tuple[str, str], int] = {}  # (utc date, node | "*") -> calls
         self.log: list[dict[str, Any]] = []
         # Called after every provider call: (request, response | None, info). The journal
         # uses this to record full prompts and responses.
@@ -201,6 +204,14 @@ class LLMGateway:
             raise BudgetExhausted(f"{request.node_id}: budget {bucket.state}")
         if self.config.max_calls is not None and self.calls >= self.config.max_calls:
             raise CallLimitReached(f"gateway call cap {self.config.max_calls} reached")
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        node_cap, total_cap = self.config.daily_calls_per_node, self.config.daily_calls_total
+        if node_cap is not None and self._daily.get((day, request.node_id), 0) >= node_cap:
+            raise CallLimitReached(f"{request.node_id}: daily call cap {node_cap} reached")
+        if total_cap is not None and self._daily.get((day, "*"), 0) >= total_cap:
+            raise CallLimitReached(f"daily call cap {total_cap} (all nodes) reached")
+        self._daily[(day, request.node_id)] = self._daily.get((day, request.node_id), 0) + 1
+        self._daily[(day, "*")] = self._daily.get((day, "*"), 0) + 1
         adapter = self.adapters[provider]
         attempt = 0
         while True:

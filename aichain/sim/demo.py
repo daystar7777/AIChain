@@ -15,8 +15,18 @@ import time
 from pathlib import Path
 
 from aichain.common import fmt_P
+from aichain import setup as node_setup
+from aichain.gateways.web import BrowserServiceProvider, SearchGateway
 from aichain.journal.store import Journal
-from aichain.sim.factory import ROOT, SHORT_PARAMS, ConfigError, build_network, load_default_env
+from aichain.memory import KnowledgeStore
+from aichain.sim.factory import (
+    ROOT,
+    SHORT_PARAMS,
+    ConfigError,
+    build_network,
+    default_browser_url,
+    load_default_env,
+)
 
 DEFAULT_QUESTION = {
     "title": "Python 리스트를 제자리에서 뒤집는 방법",
@@ -39,6 +49,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--journal", type=Path, default=ROOT / "data" / "journal" / "journal.db",
                     help="journal database for the web viewer")
     ap.add_argument("--no-journal", action="store_true")
+    ap.add_argument("--scenario", choices=["bounty", "research", "both"], default="bounty",
+                    help="bounty: one bridge question; research: one research episode per node")
+    ap.add_argument("--research-nodes", default=None, help="comma-separated nodes that research (default all)")
+    ap.add_argument("--browser", default=None, help="headless browser service")
+    ap.add_argument("--no-web", action="store_true", help="run without web tools")
+    ap.add_argument("--knowledge", type=Path, default=ROOT / "data" / "knowledge" / "knowledge.db",
+                    help="persistent node memory (knowledge) database")
+    ap.add_argument("--nodes-file", type=Path, default=ROOT / "data" / "nodes.json",
+                    help="interests from `python -m aichain.setup`")
+    ap.add_argument("--daily-calls-per-node", type=int, default=50)
+    ap.add_argument("--daily-calls-total", type=int, default=200)
     args = ap.parse_args(argv)
 
     load_default_env()
@@ -50,8 +71,14 @@ def main(argv: list[str] | None = None) -> int:
     params = SHORT_PARAMS
     with trace_path.open("w", encoding="utf-8") as trace:
         try:
+            web = None if args.no_web or args.scenario == "bounty" else SearchGateway(
+                BrowserServiceProvider(args.browser or default_browser_url()))
+            knowledge = KnowledgeStore(args.knowledge) if args.scenario != "bounty" else None
             net = build_network(args.provider, args.model, args.nomad_model, max_calls, params,
-                                trace=trace, echo=not args.quiet)
+                                trace=trace, echo=not args.quiet, web=web, knowledge=knowledge,
+                                interests=node_setup.load(args.nodes_file),
+                                daily_calls_per_node=args.daily_calls_per_node,
+                                daily_calls_total=args.daily_calls_total)
         except ConfigError as e:
             print(e, file=sys.stderr)
             return 2
@@ -63,10 +90,15 @@ def main(argv: list[str] | None = None) -> int:
                 "params": vars(params)})
             journal.attach(net)
         try:
-            net.bridge_question("n1", "demo", **DEFAULT_QUESTION)
-            net.run_until_idle()
-            net.advance(params.commit_blocks + params.reveal_blocks + params.judge_blocks
-                        + params.dispute_blocks + 2)
+            if args.scenario in ("research", "both"):
+                nodes = args.research_nodes.split(",") if args.research_nodes else None
+                net.research(nodes)
+                net.run_until_idle()
+            if args.scenario in ("bounty", "both"):
+                net.bridge_question("n1", "demo", **DEFAULT_QUESTION)
+                net.run_until_idle()
+                net.advance(params.commit_blocks + params.reveal_blocks + params.judge_blocks
+                            + params.dispute_blocks + 2)
         finally:
             if journal:
                 journal.close()
@@ -81,6 +113,11 @@ def main(argv: list[str] | None = None) -> int:
     for nid, a in net.board.accounts.items():
         print(f"{nid}: balance {fmt_P(a.balance_mP)} locked {fmt_P(a.locked_mP)}")
     print(f"burned {fmt_P(net.board.burned_mP)}, supply check: {net.board.total_supply_check()}")
+    for node in net.nodes.values():
+        for note in node.memory.notes():
+            if note.data:
+                print(f"note {node.id} [{note.topic}] facts={len(note.data['facts'])} "
+                      f"confidence={note.data['confidence']}: {note.data['summary'][:120]}")
     print(f"LLM calls: {net.gateway.calls}, episodes: {len(net.episodes)}, trace: {trace_path}")
     return 0
 

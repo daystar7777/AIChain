@@ -13,6 +13,8 @@ from typing import Any, Callable, TextIO
 from aichain.board import Board, BoardEvent, Params
 from aichain.content import ContentStore
 from aichain.gateways.llm.base import LLMGateway
+from aichain.gateways.web import SearchGateway
+from aichain.memory import KnowledgeStore
 from aichain.node import EpisodeResult, Node, NodeConfig
 
 SECONDS_PER_BLOCK = 5
@@ -20,8 +22,14 @@ SECONDS_PER_BLOCK = 5
 
 class Network:
     def __init__(self, gateway: LLMGateway, params: Params | None = None,
-                 trace: TextIO | None = None, echo: bool = False) -> None:
+                 trace: TextIO | None = None, echo: bool = False,
+                 web: SearchGateway | None = None, knowledge: KnowledgeStore | None = None,
+                 research_interval_blocks: int | None = None) -> None:
         self.gateway = gateway
+        self.web = web
+        self.knowledge = knowledge
+        # When set, idle nodes with interests get a research_tick every this many blocks.
+        self.research_interval_blocks = research_interval_blocks
         self.board = Board(params)
         self.content = ContentStore()
         self.content_author: dict[str, str] = {}
@@ -104,11 +112,19 @@ class Network:
                 self.episodes.extend(node.run_pending())
         raise RuntimeError("network did not go idle")
 
+    def research(self, node_ids: list[str] | None = None) -> None:
+        for node in self.nodes.values():
+            if (node_ids is None or node.id in node_ids) and node.cfg.interests:
+                node.enqueue("research_tick", {})
+
     def advance(self, blocks: int) -> None:
         for _ in range(blocks):
             events = self.board.advance(1)
             if events:
                 self.dispatch(events)
+            n = self.research_interval_blocks
+            if n and self.board.height % n == 0:
+                self.research([nd.id for nd in self.nodes.values() if not nd.has_pending])
             for node in self.nodes.values():
                 node.run_duties()
             self.run_until_idle()

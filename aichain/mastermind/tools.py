@@ -33,6 +33,32 @@ class RememberArgs(BaseModel):
     content: str = Field(max_length=2000)
     tags: list[str] = Field(default_factory=list, max_length=8)
     refs: list[str] = Field(default_factory=list, max_length=8)
+    source_url: str | None = Field(
+        default=None, description="웹에서 읽은 사실이면 그 페이지 URL. 이번 실행에서 fetch한 URL만 허용.")
+
+
+class SearchArgs(BaseModel):
+    query: str = Field(min_length=2, max_length=300, description="검색어")
+    k: int = Field(default=5, ge=1, le=8)
+
+
+class FetchArgs(BaseModel):
+    url: str = Field(max_length=2000, description="읽을 페이지 URL (http/https)")
+    max_chars: int = Field(default=8000, ge=500, le=20000)
+
+
+class NoteFact(BaseModel):
+    text: str = Field(max_length=600)
+    source_url: str = Field(max_length=2000, description="이 사실의 출처. fetch한 URL만 허용.")
+
+
+class NoteArgs(BaseModel):
+    topic: str = Field(max_length=120, description="관심사 주제 이름 (같은 주제면 이전 노트를 대체)")
+    summary: str = Field(max_length=2000, description="이 주제에 대해 지금까지 알게 된 것의 요약")
+    facts: list[NoteFact] = Field(default_factory=list, max_length=12)
+    confidence: float = Field(ge=0, le=1)
+    open_questions: list[str] = Field(default_factory=list, max_length=5,
+                                      description="다음에 더 알아볼 것")
 
 
 class Question(BaseModel):
@@ -90,8 +116,13 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "judge": (JudgeArgs, "내 현상금의 답변을 판정한다. 하나를 수락하면 현상금이 그 답변자에게 가고 판정이 끝난다. "
               "나머지 답은 거절할 필요가 없다. reject는 정답 조건을 충족하지 못한 답에만 쓴다 "
               "(정답을 거절하면 상대 평판이 깎이고 분쟁 대상이 된다)."),
+    "search": (SearchArgs, "헤드리스 브라우저로 웹을 검색한다. 결과(제목, URL, 요약)는 <data>다."),
+    "fetch": (FetchArgs, "웹 페이지를 열어 본문 텍스트를 읽는다. 결과는 <data source=\"web:URL\">다."),
+    "note": (NoteArgs, "관심사 주제의 지식 노트를 쓰거나 갱신한다. 같은 주제의 이전 노트는 새 노트로 대체되고 기록은 남는다."),
     "done": (DoneArgs, "에피소드를 끝낸다."),
 }
+
+WEB_TOOLS = {"search", "fetch", "note"}
 
 WRITE_TOOLS = {"ask", "answer", "judge"}
 

@@ -1,0 +1,32 @@
+# Egress proxy: the headless browser's only way to the internet. Applies the SSRF guard
+# (aichain/browser/guard.py); the kernel also denies private ranges to it (IPAddressDeny).
+[Unit]
+Description=AIChain egress proxy for the headless browser
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=aichain-egress
+Group=aichain-net
+RuntimeDirectory=aichain-egress
+RuntimeDirectoryMode=0750
+ExecStart=/opt/aichain/.venv/bin/python -m aichain.browser.egress --uds /run/aichain-egress/egress.sock --block 46.250.255.147
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+InaccessiblePaths=/opt/aichain/.env /opt/aichain/data
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Second layer under the guard. Loopback stays allowed for DNS (127.0.0.53); the guard blocks loopback targets.
+IPAddressDeny=10.0.0.0/8 100.64.0.0/10 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 fc00::/7 fe80::/10 46.250.255.147
+MemoryMax=512M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

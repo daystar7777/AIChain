@@ -21,8 +21,18 @@ from aichain.board import Params
 from aichain.bridge.runtime import NetworkRuntime
 from aichain.bridge.server import create_app
 from aichain.bridge.tokens import DEFAULT_FILE, TokenStore
+from aichain import setup as node_setup
+from aichain.gateways.web import BrowserServiceProvider, SearchGateway
 from aichain.journal.store import Journal
-from aichain.sim.factory import ROOT, SHORT_PARAMS, ConfigError, build_network, load_default_env
+from aichain.memory import KnowledgeStore
+from aichain.sim.factory import (
+    ROOT,
+    SHORT_PARAMS,
+    ConfigError,
+    build_network,
+    default_browser_url,
+    load_default_env,
+)
 
 
 def _is_loopback(host: str) -> bool:
@@ -49,6 +59,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tokens", type=Path, default=DEFAULT_FILE)
     ap.add_argument("--journal", type=Path, default=ROOT / "data" / "journal" / "journal.db")
     ap.add_argument("--no-journal", action="store_true")
+    ap.add_argument("--research", action="store_true",
+                    help="let idle nodes research their interests on the web (off by default)")
+    ap.add_argument("--research-minutes", type=float, default=30.0)
+    ap.add_argument("--browser", default=None)
+    ap.add_argument("--knowledge", type=Path, default=ROOT / "data" / "knowledge" / "knowledge.db")
+    ap.add_argument("--nodes-file", type=Path, default=ROOT / "data" / "nodes.json")
+    ap.add_argument("--daily-calls-per-node", type=int, default=50)
+    ap.add_argument("--daily-calls-total", type=int, default=200)
     args = ap.parse_args(argv)
 
     if not _is_loopback(args.host) and not args.allow_public:
@@ -65,8 +83,17 @@ def main(argv: list[str] | None = None) -> int:
     params = SHORT_PARAMS if args.periods == "short" else Params()
     with trace_path.open("w", encoding="utf-8", buffering=1) as trace:
         try:
-            net = build_network(args.provider, args.model, args.nomad_model, args.max_calls, params,
-                                trace=trace)
+            interval = (max(1, round(args.research_minutes * 60 / args.block_seconds))
+                        if args.research else None)
+            net = build_network(
+                args.provider, args.model, args.nomad_model, args.max_calls, params, trace=trace,
+                web=(SearchGateway(BrowserServiceProvider(args.browser or default_browser_url()))
+                     if args.research else None),
+                knowledge=KnowledgeStore(args.knowledge),
+                interests=node_setup.load(args.nodes_file),
+                research_interval_blocks=interval,
+                daily_calls_per_node=args.daily_calls_per_node,
+                daily_calls_total=args.daily_calls_total)
         except ConfigError as e:
             print(e, file=sys.stderr)
             return 2

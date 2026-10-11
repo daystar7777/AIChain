@@ -126,3 +126,25 @@ def test_viewer_is_read_only(tmp_path):
 def test_viewer_without_database(tmp_path):
     client = TestClient(create_app(tmp_path / "missing.db"))
     assert client.get("/api/runs").status_code == 503
+
+
+def test_viewer_knowledge_endpoint(tmp_path):
+    from aichain import setup as node_setup
+    from aichain.gateways.web import FakeWebProvider, SearchGateway
+    from aichain.memory import KnowledgeStore
+    from aichain.sim.brains import research_brain
+
+    page = "https://example.org/py"
+    web = FakeWebProvider(results={"Python": [{"title": "t", "url": page, "snippet": "s"}]},
+                          pages={page: {"title": "Py", "text": "Python fact text"}})
+    kdb = tmp_path / "k.db"
+    net = build_network("scripted", brain=research_brain, web=SearchGateway(web),
+                        knowledge=KnowledgeStore(kdb), interests=node_setup.DEFAULT_INTERESTS)
+    net.research(["n2"])
+    net.run_until_idle()
+    client = TestClient(create_app(tmp_path / "j.db", knowledge_path=kdb))
+    k = client.get("/api/knowledge").json()["nodes"]["n2"]
+    assert k["notes"][0]["topic"] == "Python 개발" and k["notes"][0]["version"] == 1
+    assert k["notes"][0]["facts"][0]["source_url"] == page
+    assert k["facts"][0]["url"] == page
+    assert client.get("/api/knowledge", params={"node": "n1"}).json()["nodes"] == {}

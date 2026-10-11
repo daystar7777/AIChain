@@ -36,6 +36,11 @@ def escape_data(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def data_block(source: str, text: str, trust: float | None = None) -> str:
-    trust_attr = f' trust="{trust:.2f}"' if trust is not None else ""
-    return f'<data source="{escape_data(source)}"{trust_attr}>\n{escape_data(text)}\n</data>'
+def escape_attr(text: str) -> str:
+    return escape_data(text).replace('"', "&quot;")
+
+
+def data_block(source: str, text: str, trust: float | None = None, **attrs: str) -> str:
+    extra = f' trust="{trust:.2f}"' if trust is not None else ""
+    extra += "".join(f' {k}="{escape_attr(str(v))}"' for k, v in attrs.items())
+    return f'<data source="{escape_attr(source)}"{extra}>\n{escape_data(text)}\n</data>'
