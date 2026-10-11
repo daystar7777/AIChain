@@ -31,6 +31,7 @@ from aichain.gateways.llm.base import (
     TokenBucket,
 )
 from aichain.mastermind import prompt
+from aichain.mastermind import persona_guard
 from aichain.mastermind.policy import PolicyGuard, PolicyViolation
 from aichain.mastermind.tools import (
     TOOLS,
@@ -40,6 +41,7 @@ from aichain.mastermind.tools import (
     AnswerArgs,
     AskArgs,
     DisputeArgs,
+    PersonaEditArgs,
     ProposeArgs,
     RateArgs,
     VoteArgs,
@@ -83,6 +85,7 @@ PRIORITY = {
     "peer_msg": 4,
     "idle_tick": 5,
     "research_tick": 5,
+    "reflect": 5,
 }
 
 RESEARCH_INSTRUCTIONS = """지금은 연구 단계다. 처리할 거래는 없다.
@@ -142,9 +145,10 @@ class Node:
         self.cfg = cfg
         self.id = cfg.node_id
         self.net = net
-        self.persona_layer = prompt.load(cfg.persona) + _interests_section(cfg.interests)
         self.core_prompt = prompt.load("core")
         self.memory = Memory(cfg.node_id, net.knowledge)
+        # The persona layer evolves through reflection; the latest approved version survives restarts.
+        self.persona_text, self.persona_version, self.last_persona_edit = self._load_persona()
         # URLs this node actually fetched (url -> content hash): the only allowed web sources.
         self._web_seen: dict[str, str] = {}
         self._used_web = False
@@ -214,6 +218,39 @@ class Node:
         for b in self.net.board.bounties.values():
             if b.asker == self.id and b.state == BountyState.JUDGING and b.accepted is None:
                 self.enqueue("judge_due", {"bounty_id": b.bounty_id})
+
+    @property
+    def persona_layer(self) -> str:
+        return self.persona_text + _interests_section(self.cfg.interests)
+
+    def _load_persona(self) -> tuple[str, int, int | None]:
+        text, version, last_edit = prompt.load(self.cfg.persona), 1, None
+        for r in self.memory.records:
+            if r.kind == "persona" and r.data and r.data.get("verdict") in ("approved", "rollback"):
+                text, version = r.data["text"], r.data["version"]
+                if r.data.get("verdict") == "approved":
+                    last_edit = r.height
+        return text, version, last_edit
+
+    def persona_history(self) -> list[dict[str, Any]]:
+        base = [{"version": 1, "verdict": "initial", "height": 0, "text": prompt.load(self.cfg.persona)}]
+        return base + [{**r.data, "height": r.height, "seq": r.seq} for r in self.memory.records
+                       if r.kind == "persona" and r.data]
+
+    def rollback_persona(self, version: int, note: str) -> int:
+        """Operator rollback (04 doc 5.3): restore an earlier approved version as a new version."""
+        target = next((h for h in self.persona_history()
+                       if h["version"] == version and h["verdict"] in ("initial", "approved", "rollback")), None)
+        if target is None:
+            raise BoardError(f"{self.id} has no persona version {version}")
+        new_version = max(h["version"] for h in self.persona_history()) + 1
+        self.memory.remember(self.net.board.height, "persona", "operator", 1.0,
+                             f"성향 v{new_version}: v{version}로 롤백 ({note})", ["persona"],
+                             data={"version": new_version, "verdict": "rollback", "text": target["text"],
+                                   "from_version": version, "note": note})
+        self.persona_text, self.persona_version = target["text"], new_version
+        self.net.log("operator", "persona_rollback", target=self.id, to_version=version, version=new_version)
+        return new_version
 
     def check_budget_state(self) -> None:
         state = self.bucket.current_state()
@@ -323,6 +360,24 @@ class Node:
                      + data_block(f"proposal:{prop.proposal_id}", json.dumps(spec, ensure_ascii=False, indent=1),
                                   trust=self.net.reputation(prop.proposer).value))
             attrs = f'proposal_id="{prop.proposal_id}" kind="{prop.kind}"'
+        elif ev.kind == "reflect":
+            since = p.get("since_seq", 0)
+            recent = [r for r in self.memory.records if r.seq > since and r.kind in (
+                "episode", "fact", "belief", "relation", "note")][-25:]
+            rep, bal = self.net.reputation(self.id).value, board.account(self.id).balance_mP
+            prev = p.get("prev") or {}
+            lines = "\n".join(f"- #{r.seq} [{r.kind}] source={r.source}: {escape_data(r.content[:200])}"
+                               for r in recent) or "(새 기억 없음)"
+            history = [h for h in self.persona_history() if h["verdict"] != "initial"][-3:]
+            hist = "\n".join(f"- v{h['version']} {h['verdict']}" + (f" (실패 {h.get('failed')})" if h.get("failed") else "")
+                             for h in history) or "(수정 기록 없음)"
+            inner = (prompt.render_core(prompt.load("reflect"), period=p.get("period", "지난 회고 이후"))
+                     + f"\n\n## 변화\n- 평판 {prev.get('rep', rep):.2f} → {rep:.2f}\n"
+                       f"- 잔액 {fmt_P(prev.get('balance', bal))} → {fmt_P(bal)}\n"
+                     + f"\n## 지난 회고 이후의 기억\n{lines}\n"
+                     + f"\n## 현재 성향 레이어 (v{self.persona_version})\n{escape_data(self.persona_text)}\n"
+                     + f"\n## 성향 수정 기록\n{hist}")
+            attrs = f'version="{self.persona_version}"'
         elif ev.kind == "review_settled":
             b = board.bounty(p["bounty_id"])
             q = self.net.content.get(b.question_hash)
@@ -599,6 +654,27 @@ class Node:
                              author=st.owner, paid=fmt_P(listing.price_call_mP))
             label = f"tool:{args.tool_id}@{version or st.current if st else '?'}"
             return Prewrapped(data_block(label, json.dumps(out, ensure_ascii=False), trust=trust))
+        if isinstance(args, PersonaEditArgs):
+            by_seq = {r.seq: r for r in self.memory.records}
+            sources = [by_seq[i].source for i in args.refs if i in by_seq]
+            in_reflect = self.current_event is not None and self.current_event.kind == "reflect"
+            verdict = persona_guard.check(args.new_text.strip(), self.persona_text, in_reflect=in_reflect,
+                                          height=h, last_edit_height=self.last_persona_edit,
+                                          refs_sources=sources)
+            version = max(x["version"] for x in self.persona_history()) + 1
+            data = {"version": version, "verdict": "approved" if verdict.approved else "rejected",
+                    "text": args.new_text.strip(), "reason": args.reason, "refs": args.refs,
+                    "failed": verdict.failed}
+            self.memory.remember(h, "persona", "self", 1.0,
+                                 f"성향 수정안 v{version} {'승인' if verdict.approved else '거부'}: {args.reason}",
+                                 ["persona"], [by_seq[i].hash for i in args.refs if i in by_seq], data=data)
+            self.net.log(self.id, "persona_edit", approved=verdict.approved, version=version,
+                         failed=verdict.failed, reasons=verdict.reasons, reason=args.reason[:300],
+                         chars=len(args.new_text))
+            if not verdict.approved:
+                raise BoardError("성향 수정 거부: " + "; ".join(verdict.reasons))
+            self.persona_text, self.persona_version, self.last_persona_edit = args.new_text.strip(), version, h
+            return f"성향 레이어 v{version} 승인됨. 다음 에피소드부터 적용된다."
         if isinstance(args, ProposeArgs):
             spec_hash = self.net.put_content({"title": args.title, "spec": args.spec}, author=self.id)
             prop = board.create_proposal(self.id, args.kind, args.title, spec_hash,
@@ -741,7 +817,7 @@ class Node:
         raise BoardError(f"unhandled tool {name}")
 
     def tool_names(self) -> list[str]:
-        names = [n for n in TOOLS if n not in WEB_TOOLS | WORKSHOP_TOOLS and n != "done"]
+        names = [n for n in TOOLS if n not in WEB_TOOLS | WORKSHOP_TOOLS and n not in ("done", "persona_edit")]
         active = self.bucket.state == BudgetState.ACTIVE
         # Web tools exist only with a web gateway and only while the budget is ACTIVE (05 doc 1.3).
         if self.net.web is not None and active:
@@ -750,6 +826,8 @@ class Node:
             names += ["tool_dev", "tool_list", "tool_activate", "tool_publish", "tool_market"]
             if self.net.workshop.can_execute:
                 names += ["tool_license", "tool_run"]  # buying only makes sense if tools can run
+        if self.current_event is not None and self.current_event.kind == "reflect":
+            names.append("persona_edit")
         return names + ["done"]
 
     def _workshop_section(self) -> str:

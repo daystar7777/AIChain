@@ -38,6 +38,8 @@ class Network:
         self.knowledge = knowledge
         # When set, idle nodes with interests get a research_tick every this many blocks.
         self.research_interval_blocks = research_interval_blocks
+        # Daily reflection (04 doc 5.2), staggered per node; None disables.
+        self.reflect_interval_blocks: int | None = None
         self.board = Board(params)
         self.content = ContentStore()
         self.chain_stats: dict[str, int] | None = None
@@ -197,6 +199,23 @@ class Network:
         self.log("core", "busy", reason=f"events still pending after {max_rounds} rounds")
         return False
 
+    def reflect(self, node_ids: list[str] | None = None) -> None:
+        for node in self.nodes.values():
+            if node_ids is not None and node.id not in node_ids:
+                continue
+            if not self.gateway.has_daily_room(node.id):
+                continue
+            marker = next((r for r in reversed(node.memory.records)
+                           if r.kind == "reflection" and r.source == "chain:reflect"), None)
+            node.enqueue("reflect", {"since_seq": marker.seq if marker else 0,
+                                     "prev": (marker.data or {}) if marker else {},
+                                     "period": "지난 회고 이후" if marker else "시작 이후"})
+            node.memory.remember(self.board.height, "reflection", "chain:reflect", 1.0,
+                                 f"회고 시점: 평판 {self.reputation(node.id).value:.2f}, "
+                                 f"잔액 {self.board.account(node.id).balance_mP / 1000:g}P",
+                                 data={"rep": self.reputation(node.id).value,
+                                       "balance": self.board.account(node.id).balance_mP})
+
     def research(self, node_ids: list[str] | None = None) -> None:
         for node in self.nodes.values():
             if (node_ids is None or node.id in node_ids) and node.cfg.interests:
@@ -211,6 +230,13 @@ class Network:
             events = self.board.advance(1)
             if events:
                 self.dispatch(events)
+            r = self.reflect_interval_blocks
+            if r and self.nodes:
+                ids = sorted(self.nodes)
+                offset = r // len(ids)
+                due = [nid for i, nid in enumerate(ids) if (self.board.height + i * offset) % r == 0]
+                if due:
+                    self.reflect(due)
             n = self.research_interval_blocks
             if n and self.board.height % n == 0:
                 self.research([nd.id for nd in self.nodes.values() if not nd.has_pending])

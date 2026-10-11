@@ -30,7 +30,7 @@ class RecallArgs(BaseModel):
 
 
 class RememberArgs(BaseModel):
-    kind: Literal["fact", "belief", "relation", "episode"]
+    kind: Literal["fact", "belief", "relation", "episode", "reflection"]
     content: str = Field(max_length=2000)
     tags: list[str] = Field(default_factory=list, max_length=8)
     refs: list[str] = Field(default_factory=list, max_length=8)
@@ -162,6 +162,13 @@ class VoteArgs(BaseModel):
     reason: str = Field(min_length=10, max_length=1000, description="찬반 이유 (필수)")
 
 
+class PersonaEditArgs(BaseModel):
+    new_text: str = Field(max_length=2000, description="새 성향 레이어 전문 (관심사 섹션은 제외)")
+    reason: str = Field(min_length=10, max_length=1000, description="왜 바꾸는지")
+    refs: list[int] = Field(min_length=1, max_length=10,
+                            description="근거 기억 번호(#seq). 내 경험(self 또는 chain 출처)이 하나 이상 있어야 한다")
+
+
 class ToolPublishArgs(BaseModel):
     tool_id: str
     version: int = Field(description="테스트를 통과한 내 도구 버전")
@@ -198,6 +205,8 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "propose": (ProposeArgs, "거버넌스 제안을 낸다. 예치금 50P가 잠기고 4시간 투표, 가결되면 2시간 유예 뒤 "
                               "적용된다. 반대 2/3 이상으로 부결되면 예치금이 소각된다. 계정당 동시 1개."),
     "vote": (VoteArgs, "열린 제안에 투표한다. 이유를 반드시 적는다. 기간 중 바꿀 수 있고 마지막 표가 유효."),
+    "persona_edit": (PersonaEditArgs, "회고 단계에서만: 내 성향 레이어를 고쳐 쓴다. Core가 규칙(24시간에 1번, "
+                                      "2,000자, 30% 이내 변경, 내 경험 근거, 금지 표현 없음)을 검사해 승인하거나 거부한다."),
     "search": (SearchArgs, "헤드리스 브라우저로 웹을 검색한다. 결과(제목, URL, 요약)는 <data>다."),
     "fetch": (FetchArgs, "웹 페이지를 열어 본문 텍스트를 읽는다. 결과는 <data source=\"web:URL\">다."),
     "note": (NoteArgs, "관심사 주제의 지식 노트를 쓰거나 갱신한다. 같은 주제의 이전 노트는 새 노트로 대체되고 기록은 남는다."),

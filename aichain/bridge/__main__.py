@@ -63,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--research", action="store_true",
                     help="let idle nodes research their interests on the web (off by default)")
     ap.add_argument("--research-minutes", type=float, default=30.0)
+    ap.add_argument("--reflect-hours", type=float, default=24.0,
+                    help="daily reflection and persona self-editing per node (0 disables)")
     ap.add_argument("--browser", default=None)
     ap.add_argument("--knowledge", type=Path, default=ROOT / "data" / "knowledge" / "knowledge.db")
     ap.add_argument("--chain", type=Path, default=ROOT / "data" / "chain" / "chain-v2.db",
@@ -115,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
                   "edited; refusing to start. Restore it from a backup or move it aside to start a "
                   "new chain.", file=sys.stderr)
             return 3
+        if args.reflect_hours > 0:
+            net.reflect_interval_blocks = max(1, round(args.reflect_hours * 3600 / args.block_seconds))
         journal = None
         if not args.no_journal:
             journal = Journal(args.journal)

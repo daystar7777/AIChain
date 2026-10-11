@@ -6,6 +6,8 @@
     python -m aichain.admin proposals [--all]
     python -m aichain.admin vote <proposal_id> yes|no|abstain --reason "why"   (operator seat)
     python -m aichain.admin veto <proposal_id> --reason "why"                   (root, timelock only)
+    python -m aichain.admin persona <node> [--version N]          (history, or show one version)
+    python -m aichain.admin rollback <node> <version> --note "why"
 
 Rulings are signed by the root key inside the network and recorded on the chain.
 """
@@ -44,10 +46,37 @@ def main(argv: list[str] | None = None) -> int:
     ve = sub.add_parser("veto", help="root veto during the timelock")
     ve.add_argument("proposal_id")
     ve.add_argument("--reason", required=True)
+    pe = sub.add_parser("persona", help="persona version history of a node")
+    pe.add_argument("node")
+    pe.add_argument("--version", type=int)
+    rb = sub.add_parser("rollback", help="restore an earlier persona version")
+    rb.add_argument("node")
+    rb.add_argument("version", type=int)
+    rb.add_argument("--note", default="")
     args = ap.parse_args(argv)
 
     token = args.token_file.read_text().strip()
     client = httpx.Client(base_url=args.url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+    if args.cmd == "persona":
+        r = client.get(f"/admin/v1/persona/{args.node}")
+        r.raise_for_status()
+        data = r.json()
+        if args.version:
+            item = next((h for h in data["history"] if h["version"] == args.version), None)
+            print(item["text"] if item else "no such version")
+            return 0
+        print(f"{data['node']}: current v{data['current_version']}")
+        for h in data["history"]:
+            extra = f" failed={h.get('failed')}" if h.get("failed") else ""
+            print(f"  v{h['version']} {h['verdict']} @#{h['height']}{extra}  {h.get('reason', h.get('note', ''))[:120]}")
+        return 0
+    if args.cmd == "rollback":
+        r = client.post(f"/admin/v1/persona/{args.node}/rollback", json={"version": args.version, "note": args.note})
+        if r.status_code >= 400:
+            print(f"error {r.status_code}: {r.text}", file=sys.stderr)
+            return 1
+        print(f"{args.node} -> v{r.json()['version']} (restored v{args.version})")
+        return 0
     if args.cmd == "proposals":
         r = client.get("/admin/v1/proposals", params={"state": "all" if args.all else "open"})
         r.raise_for_status()

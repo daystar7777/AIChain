@@ -153,6 +153,7 @@ const KIND = {
   tool_used: ["도구 사용료", ""], tool_defined: ["도구 정의", ""], tool_activated: ["도구 활성화", ""],
   chain_replayed: ["체인 재생", ""], episode_error: ["에피소드 오류", "bad"], tool_error: ["도구 오류", "bad"],
   memory_error: ["기억 오류", "bad"], busy: ["처리 지연", "warn"],
+  persona_edit: ["성향 수정", "warn"], persona_rollback: ["성향 롤백", "bad"],
   proposal_created: ["제안", "warn"], voted: ["투표", ""], proposal_vetoed: ["거부권", "bad"],
   proposal_tallied: ["개표", "warn"], proposal_approved: ["제안 적용", "ok"], epoch_issued: ["발행", "ok"],
 };
@@ -212,6 +213,8 @@ function describe(e) {
     case "rated": return `${esc(d.subject)} ${d.score > 0 ? "+" : ""}${d.score} (${esc(d.context_ref)}) ${esc(short(d.comment, 80))}`;
     case "tool_published": return `${esc(d.tool_id)} v${d.version} · 라이선스 ${esc(d.price_install)} · 호출 ${esc(d.price_call)}`;
     case "tool_licensed": case "tool_used": return `${esc(d.tool_id)} v${d.version} → ${esc(d.author)} ${esc(d.paid)}`;
+    case "persona_edit": return `v${d.version} <b>${d.approved ? "승인" : "거부"}</b> ${esc((d.reasons || []).join("; "))} — ${esc(short(d.reason, 120))}`;
+    case "persona_rollback": return `${esc(d.target)} → v${d.to_version} 복원 (새 v${d.version})`;
     case "proposal_created": return `${esc(d.kind)} '${esc(d.title)}' ${esc((d.changes || []).map(c => c.key + " " + c.from + "→" + c.to).join(", "))}`;
     case "voted": return `${esc(d.proposal_id)} <b>${esc(d.choice)}</b> — ${esc(short(d.reason, 120))}`;
     case "proposal_vetoed": return `${esc(d.proposal_id)} — ${esc(short(d.reason, 120))}`;
@@ -290,7 +293,7 @@ function renderState(s) {
     const act = r ? (r.kind === "episode_end" ? short(r.data.summary, 90) : `${r.data.tool}: ${short(r.data.result || r.data.reason, 70)}`) : "아직 행동 없음";
     return `<div class="node"><div class="name">${esc(n.id)} <span class="chip ${esc(n.budget_state)}">${esc(n.budget_state)}</span>
       ${n.paused ? '<span class="chip bad">일시정지</span>' : ""}</div>
-      <div class="persona">${esc(PERSONA[n.persona] || n.persona)} · ${esc(n.model)}</div>
+      <div class="persona">${esc(PERSONA[n.persona] || n.persona)} · 성향 v${n.persona_version ?? 1} · ${esc(n.model)}</div>
       <div class="bal">${esc(n.balance)} <span class="persona">(잠김 ${esc(n.locked)})</span></div>
       <div class="persona">평판 <b>${n.reputation ?? "-"}</b> · 예산 ${Math.round(100 * n.budget_remaining / n.budget_capacity)}% · 기억 ${n.memories}개</div>
       <div class="recent">${esc(act)}</div></div>`;

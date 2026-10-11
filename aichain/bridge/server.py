@@ -230,6 +230,29 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
             return proposal_view(net, net.board.proposals[proposal_id])
         return _gov_action(fn)
 
+    class RollbackIn(BaseModel):
+        version: int
+        note: str = Field(default="", max_length=500)
+
+    @app.get("/admin/v1/persona/{node_id}", dependencies=[Depends(operator)])
+    def persona_history(node_id: str) -> dict[str, Any]:
+        def fn(net: Any) -> dict[str, Any]:
+            node = net.nodes.get(node_id)
+            if node is None:
+                raise HTTPException(404, "unknown node")
+            return {"node": node_id, "current_version": node.persona_version,
+                    "current_text": node.persona_text, "history": node.persona_history()}
+        return runtime.call(fn)
+
+    @app.post("/admin/v1/persona/{node_id}/rollback", dependencies=[Depends(operator)])
+    def persona_rollback(node_id: str, body: RollbackIn) -> dict[str, Any]:
+        def fn(net: Any) -> dict[str, Any]:
+            node = net.nodes.get(node_id)
+            if node is None:
+                raise HTTPException(404, "unknown node")
+            return {"node": node_id, "version": node.rollback_persona(body.version, body.note)}
+        return _gov_action(fn)
+
     @app.get("/bridge/v1/network")
     def network(client: Annotated[Client, Depends(client_of)]) -> dict[str, Any]:
         return runtime.snapshot()
