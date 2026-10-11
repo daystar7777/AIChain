@@ -39,6 +39,13 @@ CREATE TABLE IF NOT EXISTS entries (
 );
 CREATE INDEX IF NOT EXISTS entries_run ON entries(run_id, id);
 CREATE INDEX IF NOT EXISTS entries_episode ON entries(run_id, episode);
+CREATE TABLE IF NOT EXISTS metrics (
+    run_id INTEGER NOT NULL REFERENCES runs(id),
+    ts REAL NOT NULL,
+    height INTEGER NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS metrics_run ON metrics(run_id, height);
 CREATE TABLE IF NOT EXISTS snapshots (
     run_id INTEGER PRIMARY KEY REFERENCES runs(id),
     ts REAL NOT NULL,
@@ -95,6 +102,8 @@ def connect(path: Path, readonly: bool = False) -> sqlite3.Connection:
 class Journal:
     """Writer side. One instance per process; safe to call from several threads."""
 
+    METRICS_EVERY_BLOCKS = 60  # 5 minutes at 5 s/block
+
     def __init__(self, path: Path, snapshot_interval: float = 0.5) -> None:
         self.path = path
         self._conn = connect(path)
@@ -104,6 +113,7 @@ class Journal:
         self.run_id: int | None = None
         self._net: Any = None
         self._balances: dict[str, tuple[int, int]] = {}
+        self._last_metrics_height = -1
 
     # ---- runs ----
 
@@ -203,6 +213,13 @@ class Journal:
             return
         self._last_snapshot = now
         snap = network_snapshot(net)
+        h = net.board.height
+        if force or h // self.METRICS_EVERY_BLOCKS != self._last_metrics_height // self.METRICS_EVERY_BLOCKS:
+            self._last_metrics_height = h
+            with self._lock:
+                self._conn.execute("INSERT INTO metrics (run_id, ts, height, data) VALUES (?, ?, ?, ?)",
+                                   (self.run_id, now, h, json.dumps(snap["metrics"], ensure_ascii=False)))
+                self._conn.commit()
         with self._lock:
             self._conn.execute(
                 "INSERT INTO snapshots (run_id, ts, data) VALUES (?, ?, ?) "
@@ -256,8 +273,11 @@ def network_snapshot(net: Any) -> dict[str, Any]:
             "reveal_until": b.reveal_until, "judge_until": b.judge_until,
             "settled_at": b.settled_at, "question": q, "answers": answers,
         })
+    from aichain.metrics import compute as compute_metrics
+
     return {
         "height": board.height,
+        "metrics": compute_metrics(net),
         "nodes": nodes,
         "bounties": bounties,
         "supply": {"issued": fmt_P(board.issued_mP), "burned": fmt_P(board.burned_mP),

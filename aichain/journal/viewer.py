@@ -85,6 +85,14 @@ def create_app(db_path: Path, poll_seconds: float = 0.5, keepalive_seconds: floa
             raise HTTPException(404, "no snapshot for this run")
         return {"ts": rows[0]["ts"], **rows[0]["data"]}
 
+    @app.get("/api/runs/{run_id}/metrics")
+    def metrics(run_id: int, limit: Annotated[int, Query(ge=1, le=2000)] = 500) -> list[dict[str, Any]]:
+        rows = query("SELECT ts, height, data FROM metrics WHERE run_id = ? ORDER BY height", (run_id,))
+        if len(rows) > limit:  # downsample evenly, keep the latest
+            step = len(rows) / limit
+            rows = [rows[int(i * step)] for i in range(limit - 1)] + [rows[-1]]
+        return rows
+
     @app.get("/api/runs/{run_id}/episodes/{episode}")
     def episode(run_id: int, episode: str) -> list[dict[str, Any]]:
         rows = query("SELECT id, ts, height, node, kind, episode, data FROM entries "

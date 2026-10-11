@@ -86,6 +86,12 @@ details > summary { cursor: pointer; }
 .note .topic { font-weight: 600; }
 .note ul { margin: 4px 0; padding-left: 18px; font-size: 13px; }
 .note a, .fact a { color: var(--accent); word-break: break-all; }
+.mgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 8px; }
+.mcell { border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+.mcell .v { font-size: 16px; font-weight: 600; font-family: var(--mono); }
+.mcell .l { font-size: 11px; color: var(--muted); }
+.spark { width: 100%; height: 46px; }
+.legend { font-size: 11px; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; }
 .fact { font-size: 12px; border-left: 3px solid var(--line); padding: 2px 8px; margin: 4px 0; }
 </style>
 </head>
@@ -101,6 +107,7 @@ details > summary { cursor: pointer; }
 </header>
 <main>
   <div>
+    <section><h2>지표</h2><div id="metrics"><div class="empty">데이터 없음</div></div></section>
     <section><h2>노드</h2><div id="nodes" class="nodes"><div class="empty">데이터 없음</div></div></section>
     <section><h2>현상금 보드</h2><div id="bounties"><div class="empty">현상금 없음</div></div></section>
     <section><h2>분쟁 · 거버넌스 · 도구 시장</h2><div id="market"><div class="empty">없음</div></div></section>
@@ -325,6 +332,45 @@ function renderMarket(s) {
     || '<div class="empty">분쟁·도구 없음</div>';
 }
 
+const COLORS = ["#3a5bd9", "#1f8a4c", "#b7791f", "#c0392b", "#7d3cbd"];
+
+function spark(series, names) {
+  const all = series.flat().filter(v => v != null);
+  if (all.length < 2) return '<div class="meta">시계열이 쌓이는 중</div>';
+  let lo = Math.min(...all), hi = Math.max(...all);
+  if (hi === lo) { hi += 1; lo -= 1; }
+  const w = 300, h = 46;
+  const paths = series.map((ys, k) => {
+    const pts = ys.map((y, i) => `${(i / Math.max(ys.length - 1, 1)) * w},${h - ((y - lo) / (hi - lo)) * (h - 4) - 2}`);
+    return `<polyline fill="none" stroke="${COLORS[k % COLORS.length]}" stroke-width="1.5" points="${pts.join(" ")}"/>`;
+  }).join("");
+  const legend = names ? `<div class="legend">${names.map((n, k) => `<span style="color:${COLORS[k % COLORS.length]}">● ${esc(n)}</span>`).join("")}</div>` : "";
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${paths}</svg>${legend}`;
+}
+
+async function loadMetrics() {
+  if (runId == null) return;
+  const r = await fetch(`/api/runs/${runId}/metrics`);
+  if (!r.ok) return;
+  const rows = await r.json();
+  if (!rows.length) { $("metrics").innerHTML = '<div class="empty">데이터 없음</div>'; return; }
+  const m = rows[rows.length - 1].data;
+  const P = mp => (mp / 1000).toLocaleString("ko-KR", { maximumFractionDigits: 1 }) + "P";
+  const cells = [
+    ["지니 계수 (잔액)", m.gini.toFixed(3)], ["유통", P(m.supply.circulating_mP)], ["소각 누계", P(m.supply.burned_mP)],
+    ["현상금", Object.entries(m.bounties).map(([k, v]) => `${k} ${v}`).join(" · ") || "0"],
+    ["분쟁", Object.entries(m.disputes).filter(([, v]) => v).map(([k, v]) => `${k} ${v}`).join(" · ") || "0"],
+    ["도구", `등록 ${m.tools.listed} · 판매 ${m.tools.licenses}`],
+    ["오늘 LLM 호출", (m.llm_calls_today || {})["*"] ?? 0], ["지식 노트", Object.values(m.knowledge_notes).reduce((a, b) => a + b, 0)],
+    ["투표 일치율", Object.entries(m.vote_agreement).map(([k, v]) => `${k} ${(v * 100).toFixed(0)}%`).join(" · ") || "-"],
+  ].map(([l, v]) => `<div class="mcell"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join("");
+  const nodes = Object.keys(m.reputation).sort();
+  $("metrics").innerHTML = `<div class="mgrid">${cells}</div>
+    <div class="meta">평판</div>${spark(nodes.map(n => rows.map(r => r.data.reputation[n])), nodes)}
+    <div class="meta">잔액</div>${spark(nodes.map(n => rows.map(r => r.data.balances_mP[n] / 1000)), nodes)}
+    <div class="meta">지니 계수</div>${spark([rows.map(r => r.data.gini)])}`;
+}
+
 async function loadState() {
   if (runId == null) return;
   const r = await fetch(`/api/runs/${runId}/state`);
@@ -409,7 +455,8 @@ async function selectRun(id) {
   source.onopen = () => setLive(true, "실시간");
   source.onerror = () => setLive(false, "재연결 중…");
   source.onmessage = m => append(JSON.parse(m.data));
-  stateTimer = setInterval(loadState, 2000);
+  stateTimer = setInterval(() => { loadState(); loadMetrics(); }, 2000);
+  loadMetrics();
 }
 
 async function loadRuns() {

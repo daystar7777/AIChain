@@ -148,3 +148,22 @@ def test_viewer_knowledge_endpoint(tmp_path):
     assert k["notes"][0]["facts"][0]["source_url"] == page
     assert k["facts"][0]["url"] == page
     assert client.get("/api/knowledge", params={"node": "n1"}).json()["nodes"] == {}
+
+
+def test_metrics_series_and_endpoint(tmp_path):
+    from aichain.metrics import gini, vote_agreement
+
+    assert gini([1, 1, 1, 1]) == 0.0 and gini([0, 0, 0, 4]) == 0.75
+    db = tmp_path / "j.db"
+    run, net = run_demo(db)
+    client = TestClient(create_app(db))
+    rows = client.get(f"/api/runs/{run}/metrics").json()
+    assert len(rows) >= 2 and rows[-1]["data"]["bounties"] == {"PAID": 1}
+    last = rows[-1]["data"]
+    assert last["reputation"]["n2"] > last["reputation"]["n3"]
+    assert last["supply"]["circulating_mP"] + last["supply"]["escrow_mP"] + last["supply"]["burned_mP"] == last["supply"]["issued_mP"]
+
+    class P:
+        def __init__(self, votes):
+            self.votes = votes
+    assert vote_agreement([P({"a": "yes", "b": "yes"}), P({"a": "yes", "b": "no"})]) == {"a-b": 0.5}
