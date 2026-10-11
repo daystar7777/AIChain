@@ -101,6 +101,7 @@ class NodeConfig:
     # Research interests set at setup: [{"topic": ..., "description": ...}]
     interests: list[dict[str, str]] = field(default_factory=list)
     research_max_steps: int = 14
+    research_max_episode_tokens: int = 90_000  # reading pages takes context
 
 
 @dataclass(order=True)
@@ -311,6 +312,8 @@ class Node:
         messages = self._system_messages(event_text) + [Message("user", event_text)]
         tools = tool_specs(self.tool_names())
         max_steps = cfg.research_max_steps if ev.kind == "research_tick" else cfg.max_steps
+        max_tokens = (cfg.research_max_episode_tokens if ev.kind == "research_tick"
+                      else cfg.max_episode_tokens)
         self._used_web = False
         self._sources_warned = False
         steps = calls = tokens = 0
@@ -354,7 +357,7 @@ class Node:
             if finished:
                 stopped = "done"
                 break
-            if tokens >= cfg.max_episode_tokens:
+            if tokens >= max_tokens:
                 stopped = "max_tokens"
                 break
         self.memory.remember(self.net.board.height, "episode", "self", 1.0,
