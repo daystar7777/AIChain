@@ -118,7 +118,9 @@ def test_chain_write_failure_halts_safely_and_restart_recovers(tmp_path):
     store = ChainStore(db)
     net = build_network("scripted", chain=store)
     before = net.board.state_root()
-    store.append_tx = lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("disk full"))
+    real_append = store.append
+    store.append = lambda kind, *a, **k: (
+        (_ for _ in ()).throw(sqlite3.OperationalError("disk full")) if kind == "tx" else real_append(kind, *a, **k))
     ask(net)
     assert net.halted and "disk full" in net.halted
     assert net.episodes[0].stopped == "halted"

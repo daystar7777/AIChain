@@ -56,6 +56,7 @@ class Account:
     locked_mP: int = 0
     # (amount_mP, unlock_height)
     locks: list[tuple[int, int]] = field(default_factory=list)
+    pubkey: str | None = None  # Ed25519 public key (hex) that signs this account's transactions
 
     @property
     def available_mP(self) -> int:
@@ -147,10 +148,10 @@ class Board:
     # ---- accounts ----
 
     @transaction
-    def open_account(self, account_id: str, grant_mP: int) -> Account:
+    def open_account(self, account_id: str, grant_mP: int, pubkey: str | None = None) -> Account:
         if account_id in self.accounts:
             raise BoardError(f"account {account_id} exists")
-        acct = Account(account_id, grant_mP)
+        acct = Account(account_id, grant_mP, pubkey=pubkey)
         self.accounts[account_id] = acct
         self.issued_mP += grant_mP
         return acct
@@ -167,7 +168,7 @@ class Board:
         state = {
             "height": self.height, "escrow": self.escrow_mP, "burned": self.burned_mP,
             "issued": self.issued_mP, "seq": self._seq,
-            "accounts": {k: [a.balance_mP, a.locked_mP, sorted(a.locks)]
+            "accounts": {k: [a.balance_mP, a.locked_mP, sorted(a.locks), a.pubkey]
                          for k, a in sorted(self.accounts.items())},
             "bounties": {k: {**asdict(b), "state": str(b.state),
                              "outcome": str(b.outcome) if b.outcome else None}

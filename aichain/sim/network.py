@@ -17,6 +17,7 @@ from aichain.gateways.llm.base import LLMGateway
 from aichain.gateways.web import SearchGateway
 from aichain.memory import KnowledgeStore
 from aichain.workshop.registry import Workshop
+from aichain.chain.crypto import KeyStore
 from aichain.chain.store import ChainStore, attach as attach_chain
 from aichain.node import EpisodeResult, Node, NodeConfig
 
@@ -40,6 +41,7 @@ class Network:
         self.board = Board(params)
         self.content = ContentStore()
         self.chain_stats: dict[str, int] | None = None
+        self.keys: KeyStore | None = None
         self.content_author: dict[str, str] = {}
         self.nodes: dict[str, Node] = {}
         if chain is not None:
@@ -47,7 +49,8 @@ class Network:
                 self.content.put(obj)
                 if author:
                     self.content_author.setdefault(h, author)
-            self.chain_stats = attach_chain(self.board, chain)
+            self.keys = KeyStore(chain.path.parent / "keys")
+            self.chain_stats = attach_chain(self.board, chain, self.keys)
         self.events: list[dict[str, Any]] = []
         self.episodes: list[EpisodeResult] = []
         self._trace = trace
@@ -84,7 +87,8 @@ class Network:
     def add_node(self, cfg: NodeConfig, grant_mP: int = 1_000_000) -> Node:
         node = Node(cfg, self)
         if cfg.node_id not in self.board.accounts:  # already there when the chain was replayed
-            self.board.open_account(cfg.node_id, grant_mP)
+            pub = self.keys.pubkey(cfg.node_id) if self.keys is not None else None
+            self.board.open_account(cfg.node_id, grant_mP, pub)
         self.nodes[cfg.node_id] = node
         if self.chain is not None:
             node.restore_from_chain()

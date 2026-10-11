@@ -78,7 +78,7 @@ def test_replay_reproduces_state_root(tmp_path):
         assert rebuilt.state_root() == live.state_root(), seed
 
 
-def test_tampered_log_is_detected(tmp_path):
+def _signed_chain(tmp_path):
     db = tmp_path / "c.db"
     store = ChainStore(db)
     board = Board(Params())
@@ -86,12 +86,67 @@ def test_tampered_log_is_detected(tmp_path):
     board.open_account("a", 100_000)
     board.open_account("b", 100_000)
     board.create_bounty("a", "q", 5_000, [])
-    board.advance(CHECKPOINT_EVERY)  # writes a checkpoint
+    board.advance(CHECKPOINT_EVERY)
+    return db
+
+
+def _edit(db, sql):
     conn = sqlite3.connect(db)
-    conn.execute("UPDATE log SET body = replace(body, '5000', '9000') WHERE type = 'create_bounty'")
+    conn.execute(sql)
     conn.commit()
-    with pytest.raises(ReplayMismatch):
+
+
+def test_tampered_transaction_is_detected(tmp_path):
+    db = _signed_chain(tmp_path)
+    _edit(db, "UPDATE log SET data = replace(data, '5000', '9000') WHERE data LIKE '%create_bounty%'")
+    with pytest.raises(ReplayMismatch, match="id does not match"):
         replay(Board(Params()), ChainStore(db))
+
+
+def test_forged_signature_and_reordered_nonce_are_detected(tmp_path):
+    db = _signed_chain(tmp_path)
+    _edit(db, "UPDATE log SET sig = substr(sig, 1, 10) || 'ff' || substr(sig, 13) "
+              "WHERE kind = 'tx' AND data LIKE '%create_bounty%'")
+    with pytest.raises(ReplayMismatch, match="bad signature"):
+        replay(Board(Params()), ChainStore(db))
+    db2 = _signed_chain(tmp_path / "x")
+    _edit(db2, "DELETE FROM log WHERE kind = 'tx' AND data LIKE '%\"account_id\": \"a\"%'")
+    with pytest.raises(ReplayMismatch):
+        replay(Board(Params()), ChainStore(db2))
+
+
+def test_blocks_are_signed_linked_and_include_their_transactions(tmp_path):
+    db = _signed_chain(tmp_path)
+    entries = ChainStore(db).entries()
+    blocks = [e for e in entries if e[0] == "block"]
+    assert len(blocks) == CHECKPOINT_EVERY
+    assert all(b[3]["prev_hash"] == a[2] for a, b in zip(blocks, blocks[1:]))
+    assert blocks[0][3]["tx_root"] != blocks[1][3]["tx_root"]  # the first block carries 3 txs
+    # A block removed from the middle breaks the chain.
+    _edit(db, f"DELETE FROM log WHERE kind = 'block' AND height = 50")
+    with pytest.raises(ReplayMismatch, match="does not extend"):
+        replay(Board(Params()), ChainStore(db))
+
+
+def test_wrong_root_key_is_refused(tmp_path):
+    from aichain.chain.crypto import KeyStore
+
+    db = _signed_chain(tmp_path)
+    with pytest.raises(ReplayMismatch, match="root key"):
+        attach(Board(Params()), ChainStore(db), KeyStore(tmp_path / "other-keys"))
+
+
+def test_transactions_are_signed_by_the_party_they_act_for(tmp_path):
+    from aichain.chain.crypto import verify
+
+    db = _signed_chain(tmp_path)
+    txs = [e for e in ChainStore(db).entries() if e[0] == "tx"]
+    bounty = next(t for t in txs if t[3]["type"] == "create_bounty")
+    assert bounty[3]["from"] == "a" and bounty[3]["nonce"] == 1
+    board = Board(Params())
+    replay(board, ChainStore(db))
+    assert verify(board.accounts["a"].pubkey, "tx", bounty[2], bounty[4])
+    assert not verify(board.accounts["b"].pubkey, "tx", bounty[2], bounty[4])
 
 
 def test_content_survives_restart(tmp_path):
@@ -102,15 +157,3 @@ def test_content_survives_restart(tmp_path):
     assert again.content.get(h) == {"title": "x"} and again.content_author[h] == "n1"
     assert set(again.board.accounts) == {"n1", "n2", "n3", "n4"}
     assert again.board.issued_mP == 4_000_000  # genesis grants not repeated
-
-
-def test_old_checkpoints_are_skipped_not_fatal(tmp_path):
-    db = tmp_path / "c.db"
-    store = ChainStore(db)
-    board = Board(Params())
-    attach(board, store)
-    board.open_account("a", 1000)
-    store.append_checkpoint(board.height, "deadbeef")  # pre-versioning format
-    board.advance(CHECKPOINT_EVERY)
-    stats = replay(Board(Params()), ChainStore(db))
-    assert stats["old_checkpoints"] == 1 and stats["checkpoints"] == 1

@@ -263,4 +263,6 @@ def network_snapshot(net: Any) -> dict[str, Any]:
         "supply": {"issued": fmt_P(board.issued_mP), "burned": fmt_P(board.burned_mP),
                    "escrow": fmt_P(board.escrow_mP), "balanced": board.total_supply_check()},
         "llm_calls": net.gateway.calls,
+        "chain": ({"last_block": board.chain_state.prev_hash, "pending_txs": len(board.chain_state.pending)}
+                  if getattr(board, "chain_state", None) else None),
     }

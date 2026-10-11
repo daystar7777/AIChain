@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--research-minutes", type=float, default=30.0)
     ap.add_argument("--browser", default=None)
     ap.add_argument("--knowledge", type=Path, default=ROOT / "data" / "knowledge" / "knowledge.db")
-    ap.add_argument("--chain", type=Path, default=ROOT / "data" / "chain" / "chain.db",
+    ap.add_argument("--chain", type=Path, default=ROOT / "data" / "chain" / "chain-v2.db",
                     help="persistent chain log (balances, bounties survive restarts)")
     ap.add_argument("--nodes-file", type=Path, default=ROOT / "data" / "nodes.json")
     ap.add_argument("--daily-calls-per-node", type=int, default=50)

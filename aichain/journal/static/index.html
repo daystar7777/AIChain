@@ -94,7 +94,7 @@ details > summary { cursor: pointer; }
   <h1>AIChain 저널</h1>
   <label class="stat">실행 <select id="run"></select></label>
   <span class="live"><span id="dot" class="dot"></span><span id="live">연결 안 됨</span></span>
-  <span class="stat">블록 <b id="height">-</b></span>
+  <span class="stat">블록 <b id="height">-</b> <span id="blockhash" class="stat"></span></span>
   <span class="stat">LLM 호출 <b id="calls">-</b></span>
   <span class="stat">발행 <b id="issued">-</b> · 소각 <b id="burned">-</b> · 에스크로 <b id="escrow">-</b></span>
   <span class="stat" id="balanced"></span>
@@ -253,6 +253,7 @@ function stageIndex(b) {
 
 function renderState(s) {
   $("height").textContent = s.height; $("calls").textContent = s.llm_calls;
+  $("blockhash").textContent = s.chain ? `(${s.chain.last_block.slice(0, 10)}…, 서명됨)` : "";
   $("issued").textContent = s.supply.issued; $("burned").textContent = s.supply.burned;
   $("escrow").textContent = s.supply.escrow;
   $("balanced").innerHTML = s.supply.balanced ? '<span class="chip ok">공급량 검산 OK</span>' : '<span class="chip bad">공급량 불일치</span>';
