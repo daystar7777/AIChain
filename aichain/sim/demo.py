@@ -19,7 +19,7 @@ from aichain import setup as node_setup
 from aichain.gateways.web import BrowserServiceProvider, SearchGateway
 from aichain.journal.store import Journal
 from aichain.memory import KnowledgeStore
-from aichain.workshop.executor import DisabledExecutor, LocalDevExecutor
+from aichain.workshop.executor import DisabledExecutor, LocalDevExecutor, SystemdExecutor
 from aichain.workshop.registry import Workshop
 from aichain.sim.factory import (
     ROOT,
@@ -42,7 +42,8 @@ DEFAULT_QUESTION = {
 def make_workshop(args: argparse.Namespace) -> Workshop | None:
     if not args.workshop:
         return None
-    executor = LocalDevExecutor() if args.unsafe_local_exec else DisabledExecutor()
+    executor = {"disabled": DisabledExecutor, "systemd": SystemdExecutor,
+                "local-dev": LocalDevExecutor}[args.workshop_exec]()
     return Workshop(executor, ROOT / "data" / "workshop" / "workshop.db")
 
 
@@ -71,8 +72,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--daily-calls-total", type=int, default=200)
     ap.add_argument("--workshop", action="store_true",
                     help="let nodes define and version tools (execution stays disabled)")
-    ap.add_argument("--unsafe-local-exec", action="store_true",
-                    help="DEV ONLY: run tool code locally without isolation (needs AICHAIN_UNSAFE_LOCAL_EXEC=1)")
+    ap.add_argument("--workshop-exec", choices=["disabled", "systemd", "local-dev"], default="disabled",
+                    help="tool execution: disabled (default); systemd = isolated transient unit per call "
+                         "(Linux, root); local-dev = UNSAFE, development only (AICHAIN_UNSAFE_LOCAL_EXEC=1)")
     args = ap.parse_args(argv)
 
     load_default_env()

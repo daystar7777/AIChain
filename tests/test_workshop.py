@@ -153,3 +153,22 @@ def test_tool_run_hidden_when_execution_disabled(tmp_path):
     assert "tool_dev" in names and "tool_run" not in names
     assert "꺼져 있다" in net.nodes["n1"]._workshop_section()
     assert "tool_dev" not in build_network("scripted").nodes["n1"].tool_names()
+
+
+def test_systemd_executor_command_is_locked_down():
+    from aichain.workshop.executor import SYSTEMD_PROPERTIES, SystemdExecutor
+
+    ex = SystemdExecutor.__new__(SystemdExecutor)  # build the command without needing Linux/root
+    ex.python, ex.systemd_run = "/usr/bin/python3", "/usr/bin/systemd-run"
+    cmd = ex.command(7, 128)
+    props = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-p"]
+    for required in ("DynamicUser=yes", "PrivateNetwork=yes", "IPAddressDeny=any", "ProtectSystem=strict",
+                     "NoNewPrivileges=yes", "CapabilityBoundingSet=", "TasksMax=64",
+                     "MemoryMax=128M", "RuntimeMaxSec=7"):
+        assert required in props, required
+    assert any(p.startswith("InaccessiblePaths=") and "/opt/aichain" in p for p in props)
+    assert cmd[-5:-1] == ["/usr/bin/python3", "-I", "-S", "-c"]
+    assert len(props) == len(SYSTEMD_PROPERTIES) + 2
+    if not sys.platform.startswith("linux") or os.geteuid() != 0:
+        with pytest.raises(ExecutionDisabled):
+            SystemdExecutor()

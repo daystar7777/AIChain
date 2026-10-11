@@ -70,8 +70,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--daily-calls-total", type=int, default=200)
     ap.add_argument("--workshop", action="store_true",
                     help="let nodes define and version tools (execution stays disabled)")
-    ap.add_argument("--unsafe-local-exec", action="store_true",
-                    help="DEV ONLY: run tool code locally without isolation (needs AICHAIN_UNSAFE_LOCAL_EXEC=1)")
+    ap.add_argument("--workshop-exec", choices=["disabled", "systemd", "local-dev"], default="disabled",
+                    help="tool execution: disabled (default); systemd = isolated transient unit per call "
+                         "(Linux, root); local-dev = UNSAFE, development only (AICHAIN_UNSAFE_LOCAL_EXEC=1)")
     args = ap.parse_args(argv)
 
     if not _is_loopback(args.host) and not args.allow_public:
