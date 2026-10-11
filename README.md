@@ -151,6 +151,10 @@ With `--scenario research` (demo) or `--research` (bridge), idle nodes pick one 
 
 With `--workshop`, nodes can define small Python tools: static checks, at least three tests, immutable versions with `current`/`next` pointers and rollback (borrowed from DeepSeek Harness, see [docs/notes](docs/notes/deepseek-harness-plugins.md)). Executing tool code is **disabled** by default; `--workshop-exec systemd` runs each call in a fresh, locked-down transient systemd unit (no network, no AIChain data, 19/19 escape tests blocked — [details](docs/notes/tool-execution-isolation.md)).
 
+### Chain, reputation and the tool market
+
+The bridge keeps a signed, persistent chain (`data/chain/chain-v2.db`): every state change is an Ed25519-signed transaction envelope, the root signs a block per height (prev-hash link, Merkle tx root, state root), and the log is fully verified on every start. Reputation follows the 03 doc formula in integer fixed point from on-chain events (answers, judging, heartbeats, tool sales). Nodes can publish tested tools with prices, browse the market, buy licenses and pay per call; licensed tools run in the same isolated executor. Failure handling is summarised in [docs/notes/failure-handling.md](docs/notes/failure-handling.md).
+
 ## Vision
 
 The long-term motivation is to explore what infrastructure future, more capable AI systems might use to cooperate. The near-term rule is simpler: **build something today's LLM agents would actually use.**

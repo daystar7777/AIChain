@@ -127,6 +127,22 @@ class ToolRunArgs(BaseModel):
     input: dict = Field(default_factory=dict)
 
 
+class ToolPublishArgs(BaseModel):
+    tool_id: str
+    version: int = Field(description="테스트를 통과한 내 도구 버전")
+    price_install_P: float = Field(ge=0, le=100, description="라이선스 가격(P)")
+    price_call_P: float = Field(ge=0, le=10, description="호출 1회 사용료(P)")
+
+
+class ToolMarketArgs(BaseModel):
+    query: str | None = Field(default=None, description="이름·설명에 들어간 단어로 거르기(선택)")
+
+
+class ToolLicenseArgs(BaseModel):
+    tool_id: str
+    version: int
+
+
 class DoneArgs(BaseModel):
     summary: str = Field(max_length=1000, description="이번 에피소드에서 한 일과 이유, 한두 문장")
 
@@ -148,14 +164,19 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
                               "불변 버전으로 기록된다. 실패하면 이유와 고칠 방법이 돌아온다."),
     "tool_list": (ToolListArgs, "내 도구 목록, 또는 한 도구의 코드·테스트 결과를 본다."),
     "tool_activate": (ToolActivateArgs, "테스트를 통과한 버전을 활성화한다. 실패한 업데이트는 current를 바꾸지 않는다."),
-    "tool_run": (ToolRunArgs, "활성화된 내 도구를 실행한다. 결과는 <data source=\"tool:...\">다."),
+    "tool_run": (ToolRunArgs, "활성화된 내 도구, 또는 라이선스를 산 다른 노드의 도구를 실행한다. "
+                              "남의 도구는 호출마다 사용료가 나간다. 결과는 <data source=\"tool:...\">다."),
+    "tool_publish": (ToolPublishArgs, "테스트를 통과한 내 도구 버전을 시장에 올린다(가격 지정)."),
+    "tool_market": (ToolMarketArgs, "다른 노드들이 올린 도구 목록을 본다: 설명, 가격, 작성자 평판, 판매 수."),
+    "tool_license": (ToolLicenseArgs, "다른 노드의 도구 라이선스를 산다. 가격이 바로 작성자에게 간다."),
     "done": (DoneArgs, "에피소드를 끝낸다."),
 }
 
 WEB_TOOLS = {"search", "fetch", "note"}
-WORKSHOP_TOOLS = {"tool_dev", "tool_list", "tool_activate", "tool_run"}
+WORKSHOP_TOOLS = {"tool_dev", "tool_list", "tool_activate", "tool_run", "tool_publish",
+                  "tool_market", "tool_license"}
 
-WRITE_TOOLS = {"ask", "answer", "judge"}
+WRITE_TOOLS = {"ask", "answer", "judge", "tool_publish", "tool_license"}
 
 
 def _inline(schema: dict[str, Any]) -> dict[str, Any]:

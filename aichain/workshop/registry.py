@@ -176,13 +176,22 @@ class Workshop:
         self._save(st)
         return st
 
-    def run(self, caller: str, tool_id: str, input: dict[str, Any]) -> dict[str, Any]:
+    def run(self, caller: str, tool_id: str, input: dict[str, Any],
+            version: int | None = None) -> dict[str, Any]:
+        """Run the owner's active version, or (for a licensee) the licensed `version`."""
         st = self.tools.get(tool_id)
-        if st is None or not st.active or st.current is None:
-            raise WorkshopError(f"{tool_id} is not active")
-        if st.owner != caller:
-            raise WorkshopError("using another node's tool needs a license (tool market, M5)")
-        tv = st.versions[st.current]
+        if st is None:
+            raise WorkshopError(f"unknown tool {tool_id}")
+        if st.owner == caller:
+            if not st.active or st.current is None:
+                raise WorkshopError(f"{tool_id} is not active")
+            tv = st.versions[st.current]
+        else:
+            if version is None or version not in st.versions:
+                raise WorkshopError("using another node's tool needs a license for a published version")
+            tv = st.versions[version]
+            if tv.test_status != "passed":
+                raise WorkshopError(f"{tool_id} v{version} has not passed its tests")
         limits = tv.manifest["limits"]
         try:
             return self.executor.run(tv.code, input, limits["timeout_s"], limits["memory_mb"]).output

@@ -95,6 +95,18 @@ class Bounty:
 
 
 @dataclass
+class ToolListing:
+    tool_id: str
+    version: int
+    author: str
+    code_hash: str
+    price_install_mP: int
+    price_call_mP: int
+    published_height: int
+    withdrawn: bool = False
+
+
+@dataclass
 class BoardEvent:
     """Something a node may need to react to. `to` is None for a broadcast."""
 
@@ -144,6 +156,8 @@ class Board:
         self.recorder: Callable[[str, dict[str, Any]], None] | None = None
         self.halted: str | None = None  # set when the chain log can no longer be written
         self._heartbeats: set[tuple[str, int]] = set()
+        self.tools: dict[tuple[str, int], ToolListing] = {}
+        self.licenses: set[tuple[str, str, int]] = set()  # (account, tool_id, version)
 
     # ---- accounts ----
 
@@ -175,6 +189,8 @@ class Board:
                          for k, b in sorted(self.bounties.items())},
             "answers": {k: asdict(a) for k, a in sorted(self.answers.items())},
             "rep_events": sha256_hex(canonical_json(self.rep_events)),
+            "tools": {f"{k[0]}@{k[1]}": asdict(v) for k, v in sorted(self.tools.items())},
+            "licenses": sorted(self.licenses),
         }
         return sha256_hex(canonical_json(state))
 
@@ -333,6 +349,72 @@ class Board:
         self._rep(ans.author, "answer_accepted", bounty_id=bounty_id, value_mP=b.reward_mP)
         self._rep(asker, "judge_ok", bounty_id=bounty_id)
         return [self._settle(b, BountyState.PAID)]
+
+    # ---- tool market (05 doc ch. 2–3, 01 doc 3.2) ----
+
+    @transaction
+    def publish_tool(self, author: str, tool_id: str, version: int, code_hash: str,
+                     price_install_mP: int, price_call_mP: int) -> ToolListing:
+        self.account(author)
+        if not tool_id.startswith(f"{author}."):
+            raise BoardError(f"tool id must start with '{author}.'")
+        if (tool_id, version) in self.tools:
+            raise BoardError(f"{tool_id} v{version} is already published")
+        if not 0 <= price_install_mP <= 100_000 or not 0 <= price_call_mP <= 10_000:
+            raise BoardError("prices out of range (install <= 100P, call <= 10P)")
+        listing = ToolListing(tool_id, version, author, code_hash, price_install_mP, price_call_mP,
+                              self.height)
+        self.tools[(tool_id, version)] = listing
+        return listing
+
+    @transaction
+    def withdraw_tool(self, author: str, tool_id: str, version: int) -> None:
+        listing = self._listing(tool_id, version)
+        if listing.author != author:
+            raise BoardError("only the author can withdraw a tool")
+        listing.withdrawn = True  # existing licenses keep working
+
+    def _listing(self, tool_id: str, version: int) -> ToolListing:
+        listing = self.tools.get((tool_id, version))
+        if listing is None:
+            raise BoardError(f"{tool_id} v{version} is not published")
+        return listing
+
+    def _transfer(self, payer: str, payee: str, amount: int) -> None:
+        src, dst = self.account(payer), self.account(payee)
+        if src.available_mP < amount:
+            raise BoardError(f"insufficient available balance: need {amount}mP, have {src.available_mP}mP")
+        src.balance_mP -= amount
+        dst.balance_mP += amount
+
+    @transaction
+    def license_tool(self, buyer: str, tool_id: str, version: int) -> None:
+        listing = self._listing(tool_id, version)
+        if listing.withdrawn:
+            raise BoardError("tool is withdrawn")
+        if buyer == listing.author:
+            raise BoardError("cannot buy your own tool")
+        if (buyer, tool_id, version) in self.licenses:
+            raise BoardError("already licensed")
+        self._transfer(buyer, listing.author, listing.price_install_mP)
+        self.licenses.add((buyer, tool_id, version))
+        self._rep(listing.author, "tool_licensed", tool_id=tool_id, version=version,
+                  value_mP=listing.price_install_mP)
+
+    @transaction
+    def pay_tool_use(self, user: str, tool_id: str, version: int, calls: int) -> None:
+        listing = self._listing(tool_id, version)
+        if (user, tool_id, version) not in self.licenses:
+            raise BoardError("no license for this tool version")
+        if not 1 <= calls <= 100:
+            raise BoardError("calls must be 1..100")
+        amount = calls * listing.price_call_mP
+        self._transfer(user, listing.author, amount)
+        self._rep(listing.author, "tool_called", tool_id=tool_id, version=version,
+                  calls=calls, value_mP=amount)
+
+    def has_license(self, account: str, tool_id: str, version: int) -> bool:
+        return (account, tool_id, version) in self.licenses
 
     @transaction
     def heartbeat(self, account: str, epoch: int) -> None:

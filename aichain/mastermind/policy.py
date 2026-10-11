@@ -59,6 +59,11 @@ class PolicyGuard:
         if self.spent_last_hour(height) + amount_mP > limit:
             self._violate(f"hourly spend limit {limit}mP would be exceeded")
 
+    def record_spend(self, spend_mP: int, height: int) -> None:
+        """Spending that is not a write call (e.g. per-use tool fees)."""
+        if spend_mP:
+            self.spends.append((height, spend_mP))
+
     def record_write(self, spend_mP: int = 0, height: int = 0) -> None:
         self.writes_this_episode += 1
         self.consecutive_violations = 0

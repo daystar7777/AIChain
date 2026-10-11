@@ -5,7 +5,7 @@ time decay by exact halvings plus linear interpolation, and an integer log10.
 
     R = 0.30·A + 0.15·V + 0.15·J + 0.10·T + 0.10·W + 0.10·U + 0.10·S
 
-Terms without events yet in this prototype (tools, disputes, ratings) stay neutral at 0.5.
+Terms without events yet in this prototype (disputes, ratings) stay neutral at 0.5.
 A new node starts at 0.45.
 """
 
@@ -81,7 +81,7 @@ def compute(events: list[dict[str, Any]], account: str, height: int,
             continue
         weight = decay_e6(height - e["height"])
         w[e["kind"]] = w.get(e["kind"], 0) + weight
-        if e["kind"] in ("answer_accepted", "answer_auto"):
+        if e["kind"] in ("answer_accepted", "answer_auto", "tool_licensed", "tool_called"):
             income_mP += e.get("value_mP", 0)
     acc, auto = w.get("answer_accepted", 0), w.get("answer_auto", 0)
     rej, lost_ans = w.get("answer_rejected", 0), w.get("dispute_lost_answer", 0)
@@ -90,7 +90,10 @@ def compute(events: list[dict[str, Any]], account: str, height: int,
         "V": min(E6, log10_e6(E6 + income_mP * 1000) // 3),  # income in P: mP * 1000 = P in e6
         "J": E6 - _ratio_e6(w.get("judge_timeout", 0) + w.get("dispute_lost_rejection", 0),
                             bounties_created * E6 + 2 * E6),
-        "T": E6 // 2,
+        # T: tools sold (licenses), penalised by lost tool disputes; neutral without tools.
+        "T": (_ratio_e6(E6 + w.get("tool_licensed", 0),
+                        2 * E6 + w.get("tool_licensed", 0) + 3 * w.get("dispute_lost_tool", 0))
+              if w.get("tool_licensed") else E6 // 2),
         "W": E6 // 2,
         "U": min(E6, w.get("heartbeat", 0) // EPOCH_BLOCKS),
         "S": E6 // 2,
