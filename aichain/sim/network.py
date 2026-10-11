@@ -55,6 +55,7 @@ class Network:
         self.listeners: list[Callable[[dict[str, Any]], None]] = []
         # Set by Node.run_episode so every entry logged during an episode carries its id.
         self.current_episode: str | None = None
+        self.listener_errors = 0
 
     def clock_minutes(self) -> float:
         return self.board.height * SECONDS_PER_BLOCK / 60
@@ -70,7 +71,13 @@ class Network:
         if self._echo:
             print(line, file=sys.stdout, flush=True)
         for listener in self.listeners:
-            listener(entry)
+            try:
+                listener(entry)
+            except Exception as e:  # e.g. journal disk full: never let observers stop the network
+                self.listener_errors += 1
+                if self.listener_errors <= 5 or self.listener_errors % 100 == 0:
+                    print(f"[aichain] listener {getattr(listener, '__qualname__', listener)} failed "
+                          f"({self.listener_errors}x): {type(e).__name__}: {e}", file=sys.stderr)
 
     def add_node(self, cfg: NodeConfig, grant_mP: int = 1_000_000) -> Node:
         node = Node(cfg, self)
@@ -121,22 +128,35 @@ class Network:
 
     # ---- running ----
 
-    def run_until_idle(self, max_rounds: int = 50) -> None:
+    @property
+    def halted(self) -> str | None:
+        return self.board.halted
+
+    def run_until_idle(self, max_rounds: int = 50) -> bool:
+        """Run queued episodes. Returns False if events were still pending after max_rounds
+        (an event storm); they stay queued and run on the next call instead of crashing."""
         for _ in range(max_rounds):
+            if self.halted:
+                return False
             pending = [n for n in self.nodes.values() if n.has_pending]
             if not pending:
-                return
+                return True
             for node in pending:
                 self.episodes.extend(node.run_pending())
-        raise RuntimeError("network did not go idle")
+        self.log("core", "busy", reason=f"events still pending after {max_rounds} rounds")
+        return False
 
     def research(self, node_ids: list[str] | None = None) -> None:
         for node in self.nodes.values():
             if (node_ids is None or node.id in node_ids) and node.cfg.interests:
+                if not self.gateway.has_daily_room(node.id):
+                    continue  # no LLM calls left today: don't queue work that cannot run
                 node.enqueue("research_tick", {})
 
     def advance(self, blocks: int) -> None:
         for _ in range(blocks):
+            if self.halted:
+                return
             events = self.board.advance(1)
             if events:
                 self.dispatch(events)

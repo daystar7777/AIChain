@@ -75,7 +75,10 @@ class ProviderError(Exception):
 
     @property
     def retryable(self) -> bool:
-        return self.status is None or self.status == 429 or self.status >= 500
+        # None: network/timeout. 0: a bug in our adapter (not worth retrying).
+        if self.status is None:
+            return True
+        return self.status == 429 or self.status >= 500
 
 
 class ProviderAdapter(Protocol):
@@ -233,7 +236,12 @@ class LLMGateway:
                 delay = e.retry_after if e.retry_after is not None else (
                     2**attempt + self._rng.uniform(0, 0.5))
                 attempt += 1
-                self._sleep(delay)
+                self._sleep(min(delay, 60.0))
+            except Exception as e:  # adapter bug or malformed data: non-retryable provider error
+                err = ProviderError(f"adapter error: {type(e).__name__}: {e}"[:300], status=0)
+                self._notify(request, None, {"provider": provider, "attempt": attempt,
+                                             "latency_ms": _ms(started), "error": str(err), "status": 0})
+                raise err from e
         latency_ms = _ms(started)
         # Only successful calls are charged.
         weighted = resp.usage.input_tokens + self.config.output_weight * resp.usage.output_tokens
@@ -272,6 +280,13 @@ class LLMGateway:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"day": day, "calls": calls}, f)
         os.replace(tmp, path)
+
+    def has_daily_room(self, node_id: str) -> bool:
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        node_cap, total_cap = self.config.daily_calls_per_node, self.config.daily_calls_total
+        if node_cap is not None and self._daily.get((day, node_id), 0) >= node_cap:
+            return False
+        return not (total_cap is not None and self._daily.get((day, "*"), 0) >= total_cap)
 
     def daily_usage(self) -> dict[str, int]:
         day = time.strftime("%Y-%m-%d", time.gmtime())

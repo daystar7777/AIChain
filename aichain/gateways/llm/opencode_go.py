@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -49,18 +50,37 @@ def to_input_items(messages: list[Message]) -> list[dict[str, Any]]:
 
 
 def parse_output(body: dict[str, Any]) -> LLMResponse:
+    if not isinstance(body, dict):
+        raise ProviderError("response is not a JSON object", status=502)
+    if body.get("error"):
+        err = body["error"]
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        raise ProviderError(f"provider error: {msg}"[:300], status=502)
+    status = body.get("status")
+    if status == "failed":
+        raise ProviderError("response status failed", status=502)
     output = body.get("output") or []
+    if not isinstance(output, list):
+        raise ProviderError("response output is not a list", status=502)
     texts: list[str] = []
     calls: list[ToolCall] = []
     for item in output:
+        if not isinstance(item, dict):
+            continue
         kind = item.get("type")
         if kind == "function_call":
-            calls.append(ToolCall(item.get("call_id") or item.get("id") or "",
-                                  item.get("name", ""), item.get("arguments") or "{}"))
+            call_id = item.get("call_id") or item.get("id") or f"call_{len(calls)}"
+            args = item.get("arguments")
+            if not isinstance(args, str):
+                args = json.dumps(args if args is not None else {}, ensure_ascii=False)
+            calls.append(ToolCall(call_id, str(item.get("name", "")), args))
         elif kind == "message":
             for part in item.get("content") or []:
                 if part.get("type") in ("output_text", "text") and part.get("text"):
                     texts.append(part["text"])
+    if status == "incomplete" and not calls and not texts:
+        reason = (body.get("incomplete_details") or {}).get("reason", "unknown")
+        raise ProviderError(f"response incomplete ({reason}) with no usable output", status=422)
     usage = body.get("usage") or {}
     return LLMResponse(
         text="\n".join(texts) or None,
@@ -109,6 +129,18 @@ class OpenCodeGoAdapter:
         return payload
 
     def complete(self, request: LLMRequest) -> LLMResponse:
+        try:
+            return self._complete(request, replay_raw=True)
+        except ProviderError as e:
+            # Some backends reject replayed output items (e.g. reasoning items without stored
+            # state). Retry once with plain function_call items instead.
+            if e.status == 400 and any(m.raw for m in request.messages):
+                return self._complete(request, replay_raw=False)
+            raise
+
+    def _complete(self, request: LLMRequest, replay_raw: bool) -> LLMResponse:
+        if not replay_raw:
+            request = replace(request, messages=[replace(m, raw=None) for m in request.messages])
         headers = {
             "Authorization": f"Bearer {self._key}",
             "Content-Type": "application/json",
@@ -117,6 +149,8 @@ class OpenCodeGoAdapter:
         }
         try:
             r = self._client.post(self._url, headers=headers, json=self.build_payload(request))
+        except httpx.TimeoutException as e:
+            raise ProviderError(f"timeout: {e!r}") from e  # retryable (status None)
         except httpx.HTTPError as e:
             raise ProviderError(f"network error: {e!r}") from e
         if r.status_code >= 400:

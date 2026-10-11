@@ -85,7 +85,13 @@ class NetworkRuntime:
 
     def _loop(self) -> None:
         last_block = time.monotonic()
+        failures = 0
         while not self._stop.is_set():
+            if self.net.halted:
+                # Fail closed: stop producing blocks and running episodes; the API keeps answering.
+                self._refresh_snapshot()
+                self._stop.wait(1.0)
+                continue
             try:
                 self._drain_inbox()
                 self.net.run_until_idle()
@@ -93,9 +99,17 @@ class NetworkRuntime:
                     last_block = time.monotonic()
                     self.net.advance(1)
                 self._refresh_snapshot()
-            except Exception as e:  # keep the network alive; surface the error
+                failures = 0
+            except Exception as e:  # keep the network alive; surface the error, back off if it repeats
+                failures += 1
                 self.errors.append(repr(e))
-                self.net.log("runtime", "runtime_error", error=repr(e))
+                self.errors[:] = self.errors[-100:]
+                try:
+                    self.net.log("runtime", "runtime_error", error=repr(e)[:500], repeated=failures)
+                except Exception:
+                    pass
+                self._stop.wait(min(60.0, 0.5 * 2 ** min(failures, 7)))
+                continue
             self._stop.wait(min(0.05, self.block_seconds))
 
     def _drain_inbox(self) -> None:
@@ -235,6 +249,8 @@ class NetworkRuntime:
             "issued": fmt_P(board.issued_mP),
             "burned": fmt_P(board.burned_mP),
             "llm_calls": net.gateway.calls,
+            "halted": net.halted,
+            "daily_usage": net.gateway.daily_usage(),
         }
         with self._lock:
             self._snapshot = snap

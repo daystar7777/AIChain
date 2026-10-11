@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from aichain.board import Board
+from aichain.chain.errors import ChainHalted
 
 CHECKPOINT_EVERY = 120  # blocks (10 minutes at 5 s/block)
 
@@ -39,7 +40,7 @@ class ChainStore:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(self.SCHEMA)
         self._lock = threading.Lock()
@@ -128,14 +129,26 @@ def replay(board: Board, store: ChainStore) -> dict[str, int]:
 def attach(board: Board, store: ChainStore) -> dict[str, int]:
     """Replay, then record every new transaction and a checkpoint every CHECKPOINT_EVERY blocks."""
     stats = replay(board, store)
-    board.recorder = lambda tx_type, body: store.append_tx(board.height, tx_type, body)
+
+    def record(tx_type: str, body: dict) -> None:
+        try:
+            store.append_tx(board.height, tx_type, body)
+        except Exception as e:  # disk full, locked or corrupt DB: fail closed
+            board.halted = f"chain log write failed: {type(e).__name__}: {e}"
+            raise ChainHalted(board.halted) from e
+
+    board.recorder = record
     original = board._on_block
 
     def on_block():
         events = original()
-        store.set_tip(board.height)
-        if board.height % CHECKPOINT_EVERY == 0:
-            store.append_checkpoint(board.height, board.state_root())
+        try:
+            store.set_tip(board.height)
+            if board.height % CHECKPOINT_EVERY == 0:
+                store.append_checkpoint(board.height, board.state_root())
+        except Exception as e:
+            board.halted = f"chain log write failed: {type(e).__name__}: {e}"
+            raise ChainHalted(board.halted) from e
         return events
 
     board._on_block = on_block

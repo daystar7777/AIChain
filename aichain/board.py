@@ -109,6 +109,8 @@ def transaction(method):
 
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
+        if self.halted:
+            raise BoardError(f"chain halted: {self.halted}")
         result = method(self, *args, **kwargs)
         if self.recorder is not None:
             bound = sig.bind(self, *args, **kwargs)
@@ -139,6 +141,7 @@ class Board:
         self._seq = 0
         # Called as recorder(tx_type, body) after each successful transaction (see `transaction`).
         self.recorder: Callable[[str, dict[str, Any]], None] | None = None
+        self.halted: str | None = None  # set when the chain log can no longer be written
 
     # ---- accounts ----
 
@@ -347,6 +350,8 @@ class Board:
     def advance(self, blocks: int = 1) -> list[BoardEvent]:
         events: list[BoardEvent] = []
         for _ in range(blocks):
+            if self.halted:
+                break
             self.height += 1
             events.extend(self._on_block())
         return events

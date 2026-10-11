@@ -55,6 +55,7 @@ from aichain.mastermind.tools import (
 )
 from aichain.memory import Memory
 from aichain.workshop.registry import WorkshopError
+from aichain.chain.errors import ChainHalted
 
 if TYPE_CHECKING:
     from aichain.sim.network import Network
@@ -63,6 +64,8 @@ if TYPE_CHECKING:
 REP_PLACEHOLDER = 0.45
 # Default trust of web-sourced memories (04 doc 4.1, 05 doc 1.4).
 WEB_TRUST = 0.3
+# 04 doc 3.3: argument errors may be retried twice; the third consecutive failure ends the episode.
+MAX_CONSECUTIVE_TOOL_FAILURES = 3
 
 PRIORITY = {
     "judge_due": 1,
@@ -120,7 +123,7 @@ class EpisodeResult:
     llm_calls: int
     tokens: int
     summary: str | None
-    stopped: str  # done | text | max_steps | max_tokens | budget | call_limit | provider_error
+    stopped: str  # done | text | max_steps | max_tokens | budget | call_limit | provider_error | tool_errors | error
 
 
 class Prewrapped(str):
@@ -139,6 +142,7 @@ class Node:
         self._web_seen: dict[str, str] = {}
         self._used_web = False
         self._sources_warned = False
+        self._tool_failures = 0
         self.policy = PolicyGuard(cfg.node_id)
         self.bucket = TokenBucket(cfg.daily_budget_tokens, clock=net.clock_minutes)
         net.gateway.register(cfg.node_id, self.bucket)
@@ -161,7 +165,7 @@ class Node:
 
     def run_pending(self) -> list[EpisodeResult]:
         results = []
-        while self._queue:
+        while self._queue and not self.net.halted:
             ev = heapq.heappop(self._queue)
             if not self.bucket.allows(ev.priority):
                 self.net.log(self.id, "skip_event", kind=ev.kind,
@@ -312,78 +316,97 @@ class Node:
         return f'<event type="{ev.kind}" {attrs}>\n{inner}\n</event>'
 
     def run_episode(self, ev: QueuedEvent) -> EpisodeResult:
-        cfg = self.cfg
+        """One episode. Whatever goes wrong inside (provider, tools, a bug), the node ends the
+        episode cleanly, records why, and the network keeps running."""
         self.policy.start_episode()
         self.current_event = ev
         self.net.current_episode = f"{self.id}-e{next(self._episodes)}"
         ref = {"ref": ev.payload["ref"]} if "ref" in ev.payload else {}
-        event_text = self.render_event(ev)
-        messages = self._system_messages(event_text) + [Message("user", event_text)]
-        tools = tool_specs(self.tool_names())
-        max_steps = cfg.research_max_steps if ev.kind == "research_tick" else cfg.max_steps
-        max_tokens = (cfg.research_max_episode_tokens if ev.kind == "research_tick"
-                      else cfg.max_episode_tokens)
         self._used_web = False
         self._sources_warned = False
-        steps = calls = tokens = 0
+        self._tool_failures = 0
+        stats = {"steps": 0, "calls": 0, "tokens": 0}
         summary: str | None = None
         stopped = "max_steps"
         self.net.log(self.id, "episode_start", kind=ev.kind, **ref)
-        while steps < max_steps:
+        try:
+            summary, stopped = self._episode_loop(ev, stats)
+        except ChainHalted as e:
+            stopped, summary = "halted", str(e)
+        except Exception as e:  # a bug or an unexpected failure must not stop the network
+            stopped, summary = "error", f"{type(e).__name__}: {e}"[:500]
+            self.net.log(self.id, "episode_error", kind=ev.kind, error=summary,
+                         trace=_short_trace(e))
+        finally:
+            self.current_event = None
+        try:
+            self.memory.remember(self.net.board.height, "episode", "self", 1.0,
+                                 f"[{ev.kind}] {summary or '(요약 없음)'}")
+            self.net.log(self.id, "memory", kind="episode", source="self",
+                         content=f"[{ev.kind}] {summary or '(요약 없음)'}")
+        except Exception as e:  # e.g. the knowledge DB is unavailable
+            self.net.log(self.id, "memory_error", error=f"{type(e).__name__}: {e}"[:300])
+        result = EpisodeResult(self.id, ev.kind, stats["steps"], stats["calls"], stats["tokens"],
+                               summary, stopped)
+        self.net.log(self.id, "episode_end", kind=ev.kind, steps=stats["steps"],
+                     llm_calls=stats["calls"], tokens=stats["tokens"], stopped=stopped,
+                     summary=summary, **ref)
+        self.net.current_episode = None
+        self.check_budget_state()
+        return result
+
+    def _episode_loop(self, ev: QueuedEvent, stats: dict[str, int]) -> tuple[str | None, str]:
+        cfg = self.cfg
+        event_text = self.render_event(ev)
+        messages = self._system_messages(event_text) + [Message("user", event_text)]
+        tools = tool_specs(self.tool_names())
+        research = ev.kind == "research_tick"
+        max_steps = cfg.research_max_steps if research else cfg.max_steps
+        max_tokens = cfg.research_max_episode_tokens if research else cfg.max_episode_tokens
+        while stats["steps"] < max_steps:
             request = LLMRequest(self.id, cfg.model, messages, tools, cfg.temperature,
                                  cfg.max_output_tokens)
             try:
                 resp = self.net.gateway.chat(cfg.provider, request, ev.priority)
             except BudgetExhausted as e:
-                stopped, summary = "budget", str(e)
-                break
+                return str(e), "budget"
             except CallLimitReached as e:
-                stopped, summary = "call_limit", str(e)
-                break
+                return str(e), "call_limit"
             except ProviderError as e:
-                stopped, summary = "provider_error", str(e)
-                break
-            calls += 1
-            tokens += resp.usage.input_tokens + resp.usage.output_tokens
+                return str(e), "provider_error"
+            stats["calls"] += 1
+            stats["tokens"] += resp.usage.input_tokens + resp.usage.output_tokens
             messages.append(Message("assistant", resp.text, resp.tool_calls, raw=resp.raw))
             if resp.text:
                 self.net.log(self.id, "llm_text", text=resp.text[:500])
             if not resp.tool_calls:
-                stopped, summary = "text", resp.text
-                break
-            finished = False
+                return resp.text, "text"
             for call in resp.tool_calls:
-                steps += 1
+                stats["steps"] += 1
                 if call.name == "done":
-                    summary = _parse_summary(call.arguments)
-                    result = "에피소드 종료."
-                    finished = True
-                else:
-                    result = self._exec_tool(call.name, call.arguments)
+                    messages.append(Message("tool", "에피소드 종료.", call_id=call.call_id, name=call.name))
+                    return _parse_summary(call.arguments), "done"
+                result = self._exec_tool(call.name, call.arguments)
                 messages.append(Message("tool", result, call_id=call.call_id, name=call.name))
-                if finished or steps >= max_steps:
-                    break
-            if finished:
-                stopped = "done"
-                break
-            if tokens >= max_tokens:
-                stopped = "max_tokens"
-                break
-        self.memory.remember(self.net.board.height, "episode", "self", 1.0,
-                             f"[{ev.kind}] {summary or '(요약 없음)'}")
-        self.net.log(self.id, "memory", kind="episode", source="self",
-                     content=f"[{ev.kind}] {summary or '(요약 없음)'}")
-        self.current_event = None
-        result = EpisodeResult(self.id, ev.kind, steps, calls, tokens, summary, stopped)
-        self.net.log(self.id, "episode_end", kind=ev.kind, steps=steps, llm_calls=calls,
-                     tokens=tokens, stopped=stopped, summary=summary, **ref)
-        self.net.current_episode = None
-        self.check_budget_state()
-        return result
+                if self._tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES:
+                    return (f"도구 호출이 연속 {self._tool_failures}번 실패해 에피소드를 끝냄",
+                            "tool_errors")
+                if stats["steps"] >= max_steps:
+                    return None, "max_steps"
+            if stats["tokens"] >= max_tokens:
+                return None, "max_tokens"
+        return None, "max_steps"
 
     # ---- tool execution (Core) ----
 
     def _exec_tool(self, name: str, raw_args: str) -> str:
+        out = self._exec_tool_inner(name, raw_args)
+        failed = out.startswith('<data source="core">') and any(
+            out.startswith(f'<data source="core">\n{p}') for p in ("오류", "거부", "웹 오류", "내부 오류"))
+        self._tool_failures = self._tool_failures + 1 if failed else 0
+        return out
+
+    def _exec_tool_inner(self, name: str, raw_args: str) -> str:
         if name not in TOOLS or name not in self.tool_names():
             return data_block("core", f"오류: 지금 쓸 수 없는 도구 {name}")
         model_cls = TOOLS[name][0]
@@ -407,6 +430,13 @@ class Node:
         except WebError as e:
             self.net.log(self.id, "web_error", tool=name, error=str(e), blocked=e.blocked)
             return data_block("core", f"웹 오류{'(차단됨)' if e.blocked else ''}: {e}")
+        except ChainHalted:
+            raise  # the chain log failed: stop, do not keep acting on unrecorded state
+        except Exception as e:  # a bug or an unavailable dependency: tell the model, keep going
+            self.net.log(self.id, "tool_error", tool=name, error=f"{type(e).__name__}: {e}"[:300],
+                         trace=_short_trace(e))
+            return data_block("core", f"내부 오류: {name} 처리 중 문제가 생겼다 ({type(e).__name__}). "
+                                      "같은 호출을 반복하지 말고 다른 방법을 쓰거나 에피소드를 끝내라.")
         self.net.log(self.id, "tool", tool=name, args=json.loads(args.model_dump_json()),
                      result=out[:300])
         return out if isinstance(out, Prewrapped) else data_block("core", out)
@@ -624,6 +654,13 @@ class Node:
                         f"tags={','.join(b.tags)}, 답변 {len(b.answers)}/{b.max_answers}, "
                         f"제목: {escape_data(str(q.get('title', '')))}")
         return "\n".join(rows) or "(없음)"
+
+
+def _short_trace(e: BaseException, frames: int = 4) -> str:
+    import traceback
+
+    tb = traceback.extract_tb(e.__traceback__)[-frames:]
+    return " <- ".join(f"{f.name}:{f.lineno}" for f in reversed(tb))
 
 
 def _interests_section(interests: list[dict[str, str]]) -> str:

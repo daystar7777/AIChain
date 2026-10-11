@@ -93,9 +93,13 @@ class Browser:
         self.blocked.append({"target": target, "reason": reason})
 
     async def start(self) -> None:
+        await self.proxy.start()
+        await self._launch()
+
+    async def _launch(self) -> None:
         from playwright.async_api import async_playwright
 
-        port = await self.proxy.start()
+        port = self.proxy.port
         self._pw = await async_playwright().start()
         self._browser = await self._pw.chromium.launch(
             headless=True,
@@ -116,6 +120,23 @@ class Browser:
             await self._pw.stop()
         await self.proxy.close()
 
+    async def _ensure_browser(self) -> None:
+        """Relaunch Chromium if it crashed or was killed (e.g. by the memory limit)."""
+        if self._browser is not None and self._browser.is_connected():
+            return
+        try:
+            if self._browser is not None:
+                await self._browser.close()
+        except Exception:
+            pass
+        if self._pw is not None:
+            try:
+                await self._pw.stop()
+            except Exception:
+                pass
+        self._pw = self._browser = None
+        await self._launch()
+
     async def _navigate(self, url: str, extract: bool) -> dict[str, Any]:
         # Check the top-level URL up front for a clear error; the proxy re-checks everything.
         if self.egress_uds:
@@ -129,6 +150,7 @@ class Browser:
             self._last = time.monotonic()
             started = time.monotonic()
             mark = len(self.blocked)
+            await self._ensure_browser()
             context = await self._browser.new_context(
                 user_agent=USER_AGENT, accept_downloads=False, java_script_enabled=True,
                 service_workers="block", locale="ko-KR")
@@ -152,7 +174,10 @@ class Browser:
                     with_text = {"title": await page.title(), "html": await page.content()}
                 final_url = page.url
             finally:
-                await context.close()
+                try:
+                    await context.close()
+                except Exception:  # browser already gone; _ensure_browser relaunches next time
+                    pass
             return {"status": status, "final_url": final_url,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "blocked_requests": self.blocked[mark:], **with_text}
@@ -175,7 +200,11 @@ class Browser:
         page = await self._navigate(url, extract=True)
         if page["status"] != 200:
             raise SearchBlocked("; ".join(notes + [f"wikipedia answered HTTP {page['status']}"]))
-        results = parse_wikipedia(lang, json.loads(page["text"]), k)
+        try:
+            payload = json.loads(page["text"])
+        except ValueError as e:
+            raise SearchBlocked("wikipedia returned a non-JSON page") from e
+        results = parse_wikipedia(lang, payload, k)
         return {"query": query, "results": results, "elapsed_ms": page["elapsed_ms"],
                 "engine": f"wikipedia-{lang}", "notes": notes}
 

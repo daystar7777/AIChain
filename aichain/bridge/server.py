@@ -71,6 +71,8 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
 
     @app.post("/bridge/v1/questions", status_code=202)
     def submit(q: QuestionIn, client: Annotated[Client, Depends(client_of)]) -> dict[str, Any]:
+        if runtime.net.halted:
+            raise HTTPException(503, "network halted (chain log unavailable); operator must restart it")
         if not tokens.take_quota(client):
             raise HTTPException(429, f"daily question limit ({client.daily_limit}) reached")
         rec = runtime.submit(client.name, q.title, q.body, q.acceptance_criteria,
@@ -105,7 +107,10 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
             idle = 0.0
             yield "retry: 3000\n\n"
             while True:
-                events, done = runtime.events_since(ref, after)
+                try:
+                    events, done = runtime.events_since(ref, after)
+                except KeyError:
+                    return
                 for e in events:
                     after = e["id"]
                     payload = json.dumps(e, ensure_ascii=False)

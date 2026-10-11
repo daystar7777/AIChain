@@ -88,6 +88,8 @@ class GuardProxy:
             await self._reply(writer, 403, f"blocked: {e}")
         except (OSError, asyncio.TimeoutError, ValueError) as e:
             await self._reply(writer, 502, f"upstream error: {e}")
+        except Exception as e:  # malformed request or a bug: refuse, never crash the proxy
+            await self._reply(writer, 400, f"bad request: {type(e).__name__}")
 
     async def _connect(self, addresses: list[str], port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         last: Exception | None = None

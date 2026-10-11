@@ -84,7 +84,8 @@ def test_write_limit_per_episode():
     mine = [b for b in net.board.bounties.values() if b.asker == "n1"]
     assert len(mine) == 4  # writes_per_episode
     ep = net.episodes[0]
-    assert (ep.node_id, ep.stopped, ep.steps) == ("n1", "max_steps", 8)
+    # 4 writes pass, then 3 consecutive Policy Guard rejections end the episode.
+    assert (ep.node_id, ep.stopped, ep.steps) == ("n1", "tool_errors", 7)
 
 
 def test_invalid_arguments_return_core_error():

@@ -93,7 +93,15 @@ class SearchGateway:
         if (hit := self._cached(node, "search", key, self.limits.search_ttl)) is not None:
             return hit
         self._take(node, "search", self.limits.search_per_hour)
-        result = self.provider.search(query, k)
+        result = self._call(self.provider.search, query, k)
+        results = result.get("results")
+        if not isinstance(results, list):
+            raise WebError("search provider returned no result list")
+        clean = [{"title": str(r.get("title", ""))[:300], "url": str(r.get("url", "")),
+                  "snippet": str(r.get("snippet", ""))[:500]}
+                 for r in results if isinstance(r, dict)
+                 and str(r.get("url", "")).startswith(("http://", "https://"))]
+        result = {**result, "results": clean}
         self._cache[(node, "search", key)] = (self._clock(), result)
         return result
 
@@ -102,8 +110,23 @@ class SearchGateway:
         if (hit := self._cached(node, "fetch", key, self.limits.fetch_ttl)) is not None:
             return hit
         self._take(node, "fetch", self.limits.fetch_per_hour)
-        result = self.provider.fetch(url, max_chars)
+        result = self._call(self.provider.fetch, url, max_chars)
+        if not isinstance(result.get("text"), str):
+            raise WebError("fetch returned no text")
+        result = {**result, "text": result["text"][:max_chars]}
         self._cache[(node, "fetch", key)] = (self._clock(), result)
+        return result
+
+    @staticmethod
+    def _call(fn: Callable[..., dict[str, Any]], *args: Any) -> dict[str, Any]:
+        try:
+            result = fn(*args)
+        except WebError:
+            raise
+        except Exception as e:  # malformed response, decoding error, provider bug
+            raise WebError(f"web provider failed: {type(e).__name__}: {e}"[:300]) from e
+        if not isinstance(result, dict):
+            raise WebError("web provider returned an unexpected response")
         return result
 
 
@@ -197,7 +220,10 @@ class BraveSearchProvider:
         if r.status_code >= 400:
             raise WebError(f"Brave search HTTP {r.status_code}: {r.text[:200]}",
                            blocked=r.status_code in (401, 403, 429))
-        hits = (r.json().get("web") or {}).get("results") or []
+        try:
+            hits = (r.json().get("web") or {}).get("results") or []
+        except (ValueError, AttributeError) as e:
+            raise WebError("Brave search returned malformed JSON") from e
         results = [{"title": h.get("title", ""), "url": h.get("url", ""),
                     "snippet": re.sub(r"<[^>]+>", "", h.get("description", ""))}
                    for h in hits[:k] if h.get("url", "").startswith(("http://", "https://"))]

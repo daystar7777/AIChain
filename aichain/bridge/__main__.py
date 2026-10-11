@@ -24,7 +24,7 @@ from aichain.bridge.tokens import DEFAULT_FILE, TokenStore
 from aichain import setup as node_setup
 from aichain.journal.store import Journal
 from aichain.memory import KnowledgeStore
-from aichain.chain.store import ChainStore
+from aichain.chain.store import ChainStore, ReplayMismatch
 from aichain.sim.demo import make_workshop
 from aichain.sim.factory import (
     ROOT,
@@ -110,6 +110,11 @@ def main(argv: list[str] | None = None) -> int:
         except ConfigError as e:
             print(e, file=sys.stderr)
             return 2
+        except ReplayMismatch as e:
+            print(f"chain log failed verification: {e}. The log at {args.chain} may be damaged or "
+                  "edited; refusing to start. Restore it from a backup or move it aside to start a "
+                  "new chain.", file=sys.stderr)
+            return 3
         journal = None
         if not args.no_journal:
             journal = Journal(args.journal)
