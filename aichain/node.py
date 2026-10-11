@@ -432,10 +432,12 @@ class Node:
             self._used_web = True
             res = self.net.web.search(self.id, args.query, args.k)
             self.net.log(self.id, "web_search", query=args.query, results=len(res["results"]),
+                         engine=res.get("engine"),
                          elapsed_ms=res.get("elapsed_ms"), cached=res.get("cached", False),
                          urls=[r["url"] for r in res["results"]])
-            body = "\n".join(f"{i + 1}. {r['title']}\n   {r['url']}\n   {r['snippet']}"
-                             for i, r in enumerate(res["results"])) or "(결과 없음)"
+            body = (f"engine: {res.get('engine', '?')}\n" + "\n".join(
+                f"{i + 1}. {r['title']}\n   {r['url']}\n   {r['snippet']}"
+                for i, r in enumerate(res["results"]))) if res["results"] else "(결과 없음)"
             return Prewrapped(data_block(f"web:search?q={args.query}", body, trust=WEB_TRUST))
         if isinstance(args, FetchArgs):
             self._used_web = True

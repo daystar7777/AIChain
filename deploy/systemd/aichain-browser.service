@@ -12,10 +12,16 @@ Group=aichain-browser
 SupplementaryGroups=aichain-net
 RuntimeDirectory=aichain-browser
 RuntimeDirectoryMode=0750
+UMask=0007
 StateDirectory=aichain-browser
 Environment=HOME=/var/lib/aichain-browser
 Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/aichain-browser/ms-playwright
-ExecStart=/opt/aichain/.venv/bin/python -m aichain.browser.service --uds /run/aichain-browser/browser.sock --egress-uds /run/aichain-egress/egress.sock
+# --skip-ddg: DuckDuckGo serves a bot challenge to this server's IP; search uses the Wikipedia API instead.
+# --no-chromium-sandbox: Ubuntu 24.04 AppArmor blocks the user namespaces Chromium's own sandbox needs
+# (kernel.apparmor_restrict_unprivileged_userns=1). Isolation comes from this unit: own user, private
+# network namespace, egress proxy only, no access to .env/data. To restore Chromium's sandbox, add an
+# AppArmor profile allowing `userns` for chrome-headless-shell and drop the flag.
+ExecStart=/opt/aichain/.venv/bin/python -m aichain.browser.service --uds /run/aichain-browser/browser.sock --egress-uds /run/aichain-egress/egress.sock --no-chromium-sandbox --skip-ddg
 Restart=on-failure
 RestartSec=5
 PrivateNetwork=yes

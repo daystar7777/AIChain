@@ -21,7 +21,15 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from aichain.browser.ddg import SearchBlocked, parse_results, search_url
+import json
+
+from aichain.browser.ddg import (
+    SearchBlocked,
+    parse_results,
+    parse_wikipedia,
+    search_url,
+    wikipedia_search_url,
+)
 from aichain.browser.guard import Blocked, EgressGuard
 from aichain.browser.proxy import GuardProxy, UnixForwarder
 
@@ -66,8 +74,10 @@ class Browser:
     an in-process GuardProxy is used."""
 
     def __init__(self, guard: EgressGuard, min_interval: float = 5.0, timeout_ms: int = 20_000,
-                 egress_uds: str | None = None, chromium_sandbox: bool = True) -> None:
+                 egress_uds: str | None = None, chromium_sandbox: bool = True,
+                 skip_ddg: bool = False) -> None:
         self.guard = guard
+        self.skip_ddg = skip_ddg
         self.min_interval = min_interval
         self.timeout_ms = timeout_ms
         self.chromium_sandbox = chromium_sandbox
@@ -134,6 +144,8 @@ class Browser:
             try:
                 resp = await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
                 status = resp.status if resp else None
+                if resp is not None and (await resp.header_value("x-aichain-blocked")) == "True":
+                    raise Blocked(f"egress proxy refused {url}")
                 if extract:
                     with_text = await page.evaluate(EXTRACT_JS)
                 else:
@@ -146,10 +158,26 @@ class Browser:
                     "blocked_requests": self.blocked[mark:], **with_text}
 
     async def search(self, query: str, k: int, region: str | None) -> dict[str, Any]:
-        page = await self._navigate(search_url(query, region), extract=False)
-        results = parse_results(page.pop("html"), k)
+        notes: list[str] = []
+        if not self.skip_ddg:
+            try:
+                page = await self._navigate(search_url(query, region), extract=False)
+                if page["status"] != 200:
+                    # DuckDuckGo answers bot checks with 202/403. Reported, never bypassed.
+                    raise SearchBlocked(f"duckduckgo answered HTTP {page['status']} (bot check)")
+                results = parse_results(page.pop("html"), k)
+                return {"query": query, "results": results, "elapsed_ms": page["elapsed_ms"],
+                        "engine": "duckduckgo-html"}
+            except SearchBlocked as e:
+                notes.append(str(e))
+        # Fallback: Wikipedia's official search API (covers encyclopedic topics only).
+        lang, url = wikipedia_search_url(query, k)
+        page = await self._navigate(url, extract=True)
+        if page["status"] != 200:
+            raise SearchBlocked("; ".join(notes + [f"wikipedia answered HTTP {page['status']}"]))
+        results = parse_wikipedia(lang, json.loads(page["text"]), k)
         return {"query": query, "results": results, "elapsed_ms": page["elapsed_ms"],
-                "engine": "duckduckgo-html"}
+                "engine": f"wikipedia-{lang}", "notes": notes}
 
     async def fetch(self, url: str, max_chars: int) -> dict[str, Any]:
         page = await self._navigate(url, extract=True)
@@ -211,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--uds", default=None, help="serve the API on this Unix socket instead of a port")
     ap.add_argument("--egress-uds", default=None,
                     help="egress proxy socket (production: browser in a private network namespace)")
+    ap.add_argument("--skip-ddg", action="store_true",
+                    help="go straight to the Wikipedia fallback (e.g. when DuckDuckGo challenges this IP)")
     ap.add_argument("--no-chromium-sandbox", action="store_true",
                     help="only if the kernel forbids Chromium's sandbox; keep the namespace isolation")
     ap.add_argument("--min-interval", type=float, default=5.0, help="seconds between navigations")
@@ -222,7 +252,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     extra = args.block + [b for b in os.environ.get("AICHAIN_BLOCK_IPS", "").split(",") if b]
     browser = Browser(EgressGuard(extra_blocked=extra), min_interval=args.min_interval,
-                      egress_uds=args.egress_uds, chromium_sandbox=not args.no_chromium_sandbox)
+                      egress_uds=args.egress_uds, chromium_sandbox=not args.no_chromium_sandbox,
+                      skip_ddg=args.skip_ddg)
     if args.uds:
         uvicorn.run(create_app(browser), uds=args.uds, log_level="info")
     else:

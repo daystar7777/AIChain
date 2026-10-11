@@ -61,3 +61,22 @@ def parse_results(html: str, k: int = 8) -> list[dict[str, str]]:
         if len(results) >= k:
             break
     return results
+
+
+# ---- Wikipedia (official MediaWiki search API; allowed for automated clients) ----
+
+def wikipedia_search_url(query: str, k: int) -> tuple[str, str]:
+    lang = "ko" if re.search(r"[가-힣]", query) else "en"
+    params = {"action": "query", "list": "search", "srsearch": query, "srlimit": str(k),
+              "format": "json", "utf8": "1"}
+    return lang, f"https://{lang}.wikipedia.org/w/api.php?" + urlencode(params)
+
+
+def parse_wikipedia(lang: str, payload: dict, k: int) -> list[dict[str, str]]:
+    out = []
+    for hit in (payload.get("query") or {}).get("search", [])[:k]:
+        title = hit.get("title", "")
+        snippet = BeautifulSoup(hit.get("snippet", ""), "html.parser").get_text(" ", strip=True)
+        out.append({"title": title, "snippet": snippet,
+                    "url": f"https://{lang}.wikipedia.org/wiki/" + title.replace(" ", "_")})
+    return out

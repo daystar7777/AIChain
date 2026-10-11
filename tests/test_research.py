@@ -310,3 +310,16 @@ def test_unix_egress_chain():
         server.close()
 
     run(scenario())
+
+
+def test_parse_wikipedia_fallback():
+    from aichain.browser.ddg import parse_wikipedia, wikipedia_search_url
+
+    lang, url = wikipedia_search_url("대형 언어 모델", 3)
+    assert lang == "ko" and url.startswith("https://ko.wikipedia.org/w/api.php?")
+    assert wikipedia_search_url("large language model", 3)[0] == "en"
+    payload = {"query": {"search": [{"title": "Large language model",
+                                     "snippet": 'A <span class="searchmatch">large</span> model'}]}}
+    (hit,) = parse_wikipedia("en", payload, 5)
+    assert hit == {"title": "Large language model", "snippet": "A large model",
+                   "url": "https://en.wikipedia.org/wiki/Large_language_model"}
