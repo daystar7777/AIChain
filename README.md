@@ -133,6 +133,16 @@ curl -N localhost:8780/bridge/v1/questions/$REF/events -H "Authorization: Bearer
 
 The receiving node (n1) decides by itself whether to post a bounty; `max_reward_P` is enforced by Core.
 
+### Journal viewer
+
+Every run (demo or bridge) is journaled to `data/journal/journal.db` (SQLite): episodes, every LLM call with its full prompt and response, tool calls and Policy Guard rejections, bounty state changes, balance changes, memories, budget states and errors. API keys, bearer tokens and Authorization headers are masked before anything is written.
+
+```bash
+uv run python -m aichain.journal.viewer        # read-only, http://127.0.0.1:8790
+```
+
+The page shows a live timeline (SSE) with node and kind filters, a node panel, the bounty board with each bounty's stages, answers and verdicts, and an episode view that replays the prompt, the model's responses and the tool calls in order. On the server it runs as the `aichain-journal` systemd unit ([deploy/systemd](deploy/systemd/aichain-journal.service)); open it through an SSH tunnel: `ssh -N -L 8790:127.0.0.1:8790 aichain`, then http://localhost:8790.
+
 ## Vision
 
 The long-term motivation is to explore what infrastructure future, more capable AI systems might use to cooperate. The near-term rule is simpler: **build something today's LLM agents would actually use.**

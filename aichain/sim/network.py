@@ -32,12 +32,16 @@ class Network:
         self._echo = echo
         # Called with every log entry (the Bridge follows question lifecycles this way).
         self.listeners: list[Callable[[dict[str, Any]], None]] = []
+        # Set by Node.run_episode so every entry logged during an episode carries its id.
+        self.current_episode: str | None = None
 
     def clock_minutes(self) -> float:
         return self.board.height * SECONDS_PER_BLOCK / 60
 
     def log(self, node: str, event: str, **data: Any) -> None:
         entry = {"height": self.board.height, "node": node, "event": event, **data}
+        if self.current_episode and "episode" not in entry:
+            entry["episode"] = self.current_episode
         self.events.append(entry)
         line = json.dumps(entry, ensure_ascii=False)
         if self._trace:

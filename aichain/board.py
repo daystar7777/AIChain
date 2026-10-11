@@ -355,6 +355,8 @@ class Board:
         if b.state in SETTLED_STATES and b.settled_at is not None:
             if h >= b.settled_at + p.dispute_blocks:
                 b.state = BountyState.FINAL
+                return BoardEvent("bounty_final", None, {"bounty_id": b.bounty_id,
+                                                         "outcome": str(b.outcome)})
         return None
 
     def _settle_expired(self, b: Bounty) -> BoardEvent:

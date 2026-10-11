@@ -21,6 +21,7 @@ from aichain.board import Params
 from aichain.bridge.runtime import NetworkRuntime
 from aichain.bridge.server import create_app
 from aichain.bridge.tokens import DEFAULT_FILE, TokenStore
+from aichain.journal.store import Journal
 from aichain.sim.factory import ROOT, SHORT_PARAMS, ConfigError, build_network, load_default_env
 
 
@@ -46,6 +47,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--periods", choices=["short", "design"], default="short",
                     help="short: ~17 min per bounty cycle at 5 s/block; design: 03 doc defaults")
     ap.add_argument("--tokens", type=Path, default=DEFAULT_FILE)
+    ap.add_argument("--journal", type=Path, default=ROOT / "data" / "journal" / "journal.db")
+    ap.add_argument("--no-journal", action="store_true")
     args = ap.parse_args(argv)
 
     if not _is_loopback(args.host) and not args.allow_public:
@@ -67,9 +70,20 @@ def main(argv: list[str] | None = None) -> int:
         except ConfigError as e:
             print(e, file=sys.stderr)
             return 2
+        journal = None
+        if not args.no_journal:
+            journal = Journal(args.journal)
+            journal.start_run(f"bridge · {args.provider}", {
+                "provider": args.provider, "model": args.model, "max_calls": args.max_calls,
+                "block_seconds": args.block_seconds, "periods": args.periods})
+            journal.attach(net)
         runtime = NetworkRuntime(net, block_seconds=args.block_seconds)
         print(f"trace: {trace_path}", file=sys.stderr)
-        uvicorn.run(create_app(runtime, tokens), host=args.host, port=args.port, log_level="info")
+        try:
+            uvicorn.run(create_app(runtime, tokens), host=args.host, port=args.port, log_level="info")
+        finally:
+            if journal:
+                journal.close()
     return 0
 
 

@@ -110,6 +110,8 @@ class Node:
         # answer_id -> (body, salt): kept locally until the Core reveals it.
         self._sealed: dict[str, tuple[dict[str, Any], str]] = {}
         self.current_event: QueuedEvent | None = None
+        self._episodes = itertools.count(1)
+        self._last_budget_state = self.bucket.state
 
     # ---- events ----
 
@@ -154,6 +156,14 @@ class Node:
                 + f". 내 잔액 {fmt_P(acct.balance_mP)} (잠김 {fmt_P(acct.locked_mP)}).")
         self.memory.remember(self.net.board.height, "episode", f"chain:{b.bounty_id}", 1.0, text,
                              tags=b.tags)
+        self.net.log(self.id, "memory", kind="episode", source=f"chain:{b.bounty_id}", content=text)
+
+    def check_budget_state(self) -> None:
+        state = self.bucket.current_state()
+        if state != self._last_budget_state:
+            self.net.log(self.id, "budget_state", old=str(self._last_budget_state), new=str(state),
+                         remaining=self.bucket.remaining())
+            self._last_budget_state = state
 
     # ---- Mastermind ----
 
@@ -246,6 +256,7 @@ class Node:
         cfg = self.cfg
         self.policy.start_episode()
         self.current_event = ev
+        self.net.current_episode = f"{self.id}-e{next(self._episodes)}"
         ref = {"ref": ev.payload["ref"]} if "ref" in ev.payload else {}
         event_text = self.render_event(ev)
         messages = self._system_messages(event_text) + [Message("user", event_text)]
@@ -296,10 +307,14 @@ class Node:
                 break
         self.memory.remember(self.net.board.height, "episode", "self", 1.0,
                              f"[{ev.kind}] {summary or '(요약 없음)'}")
+        self.net.log(self.id, "memory", kind="episode", source="self",
+                     content=f"[{ev.kind}] {summary or '(요약 없음)'}")
         self.current_event = None
         result = EpisodeResult(self.id, ev.kind, steps, calls, tokens, summary, stopped)
         self.net.log(self.id, "episode_end", kind=ev.kind, steps=steps, llm_calls=calls,
                      tokens=tokens, stopped=stopped, summary=summary, **ref)
+        self.net.current_episode = None
+        self.check_budget_state()
         return result
 
     # ---- tool execution (Core) ----

@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from aichain.common import fmt_P
+from aichain.journal.store import Journal
 from aichain.sim.factory import ROOT, SHORT_PARAMS, ConfigError, build_network, load_default_env
 
 DEFAULT_QUESTION = {
@@ -35,6 +36,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="hard cap on total LLM calls (default: 10 for opencode-go, none for scripted)")
     ap.add_argument("--trace", type=Path, default=None, help="JSONL trace file (default: data/trace-<ts>.jsonl)")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--journal", type=Path, default=ROOT / "data" / "journal" / "journal.db",
+                    help="journal database for the web viewer")
+    ap.add_argument("--no-journal", action="store_true")
     args = ap.parse_args(argv)
 
     load_default_env()
@@ -51,10 +55,21 @@ def main(argv: list[str] | None = None) -> int:
         except ConfigError as e:
             print(e, file=sys.stderr)
             return 2
-        net.bridge_question("n1", "demo", **DEFAULT_QUESTION)
-        net.run_until_idle()
-        net.advance(params.commit_blocks + params.reveal_blocks + params.judge_blocks
-                    + params.dispute_blocks + 2)
+        journal = None
+        if not args.no_journal:
+            journal = Journal(args.journal)
+            journal.start_run(f"demo · {args.provider}", {
+                "provider": args.provider, "model": args.model, "max_calls": max_calls,
+                "params": vars(params)})
+            journal.attach(net)
+        try:
+            net.bridge_question("n1", "demo", **DEFAULT_QUESTION)
+            net.run_until_idle()
+            net.advance(params.commit_blocks + params.reveal_blocks + params.judge_blocks
+                        + params.dispute_blocks + 2)
+        finally:
+            if journal:
+                journal.close()
 
     print("\n== result ==")
     for b in net.board.bounties.values():

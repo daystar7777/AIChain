@@ -188,6 +188,9 @@ class LLMGateway:
         self._rng = rng or random.Random(0)
         self.calls = 0
         self.log: list[dict[str, Any]] = []
+        # Called after every provider call: (request, response | None, info). The journal
+        # uses this to record full prompts and responses.
+        self.observers: list[Callable[[LLMRequest, LLMResponse | None, dict[str, Any]], None]] = []
 
     def register(self, node_id: str, bucket: TokenBucket) -> None:
         self.buckets[node_id] = bucket
@@ -201,17 +204,22 @@ class LLMGateway:
         adapter = self.adapters[provider]
         attempt = 0
         while True:
+            started = time.monotonic()
             try:
                 self.calls += 1
                 resp = adapter.complete(request)
                 break
             except ProviderError as e:
+                self._notify(request, None, {"provider": provider, "attempt": attempt,
+                                             "latency_ms": _ms(started), "error": str(e),
+                                             "status": e.status})
                 if not e.retryable or attempt >= self.config.max_retries:
                     raise
                 delay = e.retry_after if e.retry_after is not None else (
                     2**attempt + self._rng.uniform(0, 0.5))
                 attempt += 1
                 self._sleep(delay)
+        latency_ms = _ms(started)
         # Only successful calls are charged.
         weighted = resp.usage.input_tokens + self.config.output_weight * resp.usage.output_tokens
         bucket.charge(weighted)
@@ -220,4 +228,17 @@ class LLMGateway:
             "input_tokens": resp.usage.input_tokens, "output_tokens": resp.usage.output_tokens,
             "tool_calls": [c.name for c in resp.tool_calls], "retries": attempt,
         })
+        self._notify(request, resp, {"provider": provider, "attempt": attempt,
+                                     "latency_ms": latency_ms,
+                                     "weighted_tokens": weighted,
+                                     "budget_remaining": bucket.remaining(),
+                                     "budget_state": str(bucket.state)})
         return resp
+
+    def _notify(self, request: LLMRequest, resp: LLMResponse | None, info: dict[str, Any]) -> None:
+        for observer in self.observers:
+            observer(request, resp, info)
+
+
+def _ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)

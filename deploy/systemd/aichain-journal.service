@@ -1,0 +1,20 @@
+# Read-only journal viewer, loopback only. View from a Mac with:
+#   ssh -N -L 8790:127.0.0.1:8790 aichain   →   http://localhost:8790
+[Unit]
+Description=AIChain journal viewer (read-only)
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/aichain
+ExecStart=/opt/aichain/.venv/bin/python -m aichain.journal.viewer --db /opt/aichain/data/journal/journal.db --host 127.0.0.1 --port 8790
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+# SQLite readers in WAL mode need write access to the -shm file next to the database.
+ReadWritePaths=/opt/aichain/data/journal
+
+[Install]
+WantedBy=multi-user.target
