@@ -177,8 +177,8 @@ class BraveSearchProvider:
             os.replace(tmp, self.usage_path)
 
     def search(self, query: str, k: int) -> dict[str, Any]:
-        if self._today() != self._day:
-            self._day, self.used_today = self._today(), 0
+        # Re-read the shared counter: other processes (or a restart) may have searched today.
+        self._day, self.used_today = self._load()
         if self.used_today >= self.daily_cap:
             raise WebError(f"Brave search daily cap {self.daily_cap} reached (resets 00:00 UTC)")
         wait = self.min_interval - (self._clock() - self._last)
