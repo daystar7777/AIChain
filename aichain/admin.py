@@ -3,6 +3,9 @@
     python -m aichain.admin disputes [--all]
     python -m aichain.admin show <dispute_id>
     python -m aichain.admin resolve <dispute_id> uphold|reject|void --note "why"
+    python -m aichain.admin proposals [--all]
+    python -m aichain.admin vote <proposal_id> yes|no|abstain --reason "why"   (operator seat)
+    python -m aichain.admin veto <proposal_id> --reason "why"                   (root, timelock only)
 
 Rulings are signed by the root key inside the network and recorded on the chain.
 """
@@ -32,10 +35,41 @@ def main(argv: list[str] | None = None) -> int:
     res.add_argument("dispute_id")
     res.add_argument("ruling", choices=["uphold", "reject", "void"])
     res.add_argument("--note", default="")
+    pl = sub.add_parser("proposals", help="list governance proposals (open by default)")
+    pl.add_argument("--all", action="store_true")
+    vo = sub.add_parser("vote", help="vote with the operator seat")
+    vo.add_argument("proposal_id")
+    vo.add_argument("choice", choices=["yes", "no", "abstain"])
+    vo.add_argument("--reason", required=True)
+    ve = sub.add_parser("veto", help="root veto during the timelock")
+    ve.add_argument("proposal_id")
+    ve.add_argument("--reason", required=True)
     args = ap.parse_args(argv)
 
     token = args.token_file.read_text().strip()
     client = httpx.Client(base_url=args.url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+    if args.cmd == "proposals":
+        r = client.get("/admin/v1/proposals", params={"state": "all" if args.all else "open"})
+        r.raise_for_status()
+        items = r.json()
+        if not items:
+            print("(no proposals)")
+        for x in items:
+            changes = ", ".join(f"{c['key']} {c['from']}->{c['to']}" for c in x["changes"]) or "-"
+            votes = ", ".join(f"{k}:{v}" for k, v in x["votes"].items()) or "no votes yet"
+            print(f"{x['proposal_id']}  [{x['state']}] {x['kind']} '{x['title']}' by {x['proposer']}\n"
+                  f"    changes: {changes}\n    votes: {votes}  (vote until #{x['vote_until']}, "
+                  f"timelock until #{x['timelock_until']}, now #{x['height']})")
+        return 0
+    if args.cmd in ("vote", "veto"):
+        path = f"/admin/v1/proposals/{args.proposal_id}/{args.cmd}"
+        body = {"choice": args.choice, "reason": args.reason} if args.cmd == "vote" else {"reason": args.reason}
+        r = client.post(path, json=body)
+        if r.status_code >= 400:
+            print(f"error {r.status_code}: {r.text}", file=sys.stderr)
+            return 1
+        print(f"{args.proposal_id} -> {r.json()['state']}")
+        return 0
     if args.cmd in ("disputes", "show"):
         r = client.get("/admin/v1/disputes", params={"state": "all" if args.cmd == "show" or args.all else "open"})
         r.raise_for_status()

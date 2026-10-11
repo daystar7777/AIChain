@@ -94,6 +94,13 @@ class Network:
             node.restore_from_chain()
         return node
 
+    def announce_proposal(self, proposal_id: str) -> None:
+        prop = self.board.proposals[proposal_id]
+        for node in self.nodes.values():
+            if node.id != prop.proposer and node.id in self.board.voters() \
+                    and self.gateway.has_daily_room(node.id):
+                node.enqueue("proposal_open", {"proposal_id": proposal_id})
+
     def notify_dispute(self, dispute_id: str) -> None:
         """Core memory for both parties (no LLM call): opened or resolved."""
         d = self.board.disputes[dispute_id]
@@ -157,6 +164,14 @@ class Network:
                         if node.cfg.watch_settlements and node.id not in ev.payload["participants"] \
                                 and self.gateway.has_daily_room(node.id):
                             node.enqueue("review_settled", {"bounty_id": ev.payload["bounty_id"]})
+            elif ev.kind in ("proposal_tallied", "proposal_approved"):
+                prop = self.board.proposals[ev.payload["proposal_id"]]
+                for nid in self.board.voters():
+                    if nid in self.nodes:
+                        self.nodes[nid].memory.remember(
+                            self.board.height, "episode", f"chain:{prop.proposal_id}", 1.0,
+                            f"제안 {prop.proposal_id} '{prop.title}' → {prop.state} {prop.tally or ''}",
+                            tags=["governance"])
             elif ev.kind == "epoch_issued":
                 pass  # logged above; balances already credited
             elif ev.kind == "dispute_resolved":

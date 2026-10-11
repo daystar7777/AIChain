@@ -155,5 +155,5 @@ def test_content_survives_restart(tmp_path):
     h = net.put_content({"title": "x"}, author="n1")
     again = build_network("scripted", chain=ChainStore(db))
     assert again.content.get(h) == {"title": "x"} and again.content_author[h] == "n1"
-    assert set(again.board.accounts) == {"n1", "n2", "n3", "n4"}
+    assert set(again.board.accounts) == {"n1", "n2", "n3", "n4", "operator"}
     assert again.board.issued_mP == 4_000_000  # genesis grants not repeated

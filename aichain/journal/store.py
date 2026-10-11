@@ -268,6 +268,12 @@ def network_snapshot(net: Any) -> dict[str, Any]:
                       "bond": fmt_P(d.bond_mP), "deadline": d.deadline,
                       "claim": (net.content.get(d.claim_hash) or {}).get("claim")}
                      for d in board.disputes.values()],
+        "proposals": [{"proposal_id": x.proposal_id, "kind": x.kind, "title": x.title, "proposer": x.proposer,
+                       "state": x.state, "changes": x.changes, "votes": x.votes, "tally": x.tally,
+                       "vote_until": x.vote_until, "timelock_until": x.timelock_until}
+                      for x in board.proposals.values()],
+        "params": {k: getattr(board.params, k) for k in ("commit_blocks", "reveal_blocks", "judge_blocks",
+                                                          "dispute_blocks", "commit_bond_mP", "block_reward_mP")},
         "tools": [{"tool_id": t.tool_id, "version": t.version, "author": t.author,
                    "price_install": fmt_P(t.price_install_mP), "price_call": fmt_P(t.price_call_mP),
                    "sold": sum(1 for (_, tid, v) in board.licenses if tid == t.tool_id and v == t.version),

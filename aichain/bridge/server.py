@@ -183,6 +183,53 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
 
         return runtime.call(act)
 
+    class VoteIn(BaseModel):
+        choice: str = Field(pattern="^(yes|no|abstain)$")
+        reason: str = Field(min_length=3, max_length=1000)
+
+    class VetoIn(BaseModel):
+        reason: str = Field(min_length=3, max_length=1000)
+
+    def proposal_view(net: Any, prop: Any) -> dict[str, Any]:
+        from dataclasses import asdict
+
+        return {**asdict(prop), "spec": net.content.get(prop.spec_hash), "height": net.board.height,
+                "voters": net.board.voters()}
+
+    @app.get("/admin/v1/proposals", dependencies=[Depends(operator)])
+    def list_proposals(state: str | None = "open") -> list[dict[str, Any]]:
+        open_states = ("VOTING", "TIMELOCK")
+        return runtime.call(lambda net: [
+            proposal_view(net, x) for x in net.board.proposals.values()
+            if state in (None, "all") or (state == "open" and x.state in open_states) or x.state == state])
+
+    def _gov_action(fn: Any) -> Any:
+        def act(net: Any) -> Any:
+            from aichain.board import BoardError
+            try:
+                return fn(net)
+            except BoardError as e:
+                raise HTTPException(409, str(e)) from e
+        return runtime.call(act)
+
+    @app.post("/admin/v1/proposals/{proposal_id}/vote", dependencies=[Depends(operator)])
+    def operator_vote(proposal_id: str, body: VoteIn) -> dict[str, Any]:
+        def fn(net: Any) -> dict[str, Any]:
+            h = net.put_content({"reason": body.reason}, author="operator")
+            net.board.vote("operator", proposal_id, body.choice, h)
+            net.log("operator", "voted", proposal_id=proposal_id, choice=body.choice, reason=body.reason[:300])
+            return proposal_view(net, net.board.proposals[proposal_id])
+        return _gov_action(fn)
+
+    @app.post("/admin/v1/proposals/{proposal_id}/veto", dependencies=[Depends(operator)])
+    def root_veto(proposal_id: str, body: VetoIn) -> dict[str, Any]:
+        def fn(net: Any) -> dict[str, Any]:
+            h = net.put_content({"veto": body.reason}, author="root")
+            net.board.veto_proposal("root", proposal_id, h)
+            net.log("operator", "proposal_vetoed", proposal_id=proposal_id, reason=body.reason[:300])
+            return proposal_view(net, net.board.proposals[proposal_id])
+        return _gov_action(fn)
+
     @app.get("/bridge/v1/network")
     def network(client: Annotated[Client, Depends(client_of)]) -> dict[str, Any]:
         return runtime.snapshot()

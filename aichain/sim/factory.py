@@ -123,4 +123,6 @@ def build_network(
                   workshop=workshop, chain=chain)
     for cfg in default_nodes(provider, model, nomad_model, interests):
         net.add_node(cfg)
+    if "operator" not in net.board.accounts:  # the human voting seat (06 doc 1), its own key
+        net.board.open_account("operator", 0)
     return net

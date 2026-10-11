@@ -49,6 +49,10 @@ class Params:
     block_reward_mP: int = 1000
     reward_halving_blocks: int = 518_400
     issuance: bool = True
+    vote_blocks: int = 2880
+    timelock_blocks: int = 1440
+    proposal_deposit_mP: int = 50_000
+    operator_seat: bool = True
     commit_bond_mP: int = 500
     max_answers: int = 5
     max_tags: int = 5
@@ -130,6 +134,36 @@ class Rating:
     void: bool = False
 
 
+# Parameters a `param` proposal may change (06 doc 2). Anything else, including the root's
+# veto and the voter set rules, is constitutional or needs a `seat` proposal.
+GOVERNABLE_PARAMS = {
+    "min_reward_mP": (1000, 100_000), "commit_blocks": (12, 17_280), "reveal_blocks": (12, 17_280),
+    "judge_blocks": (12, 17_280), "dispute_blocks": (120, 17_280), "commit_bond_mP": (0, 10_000),
+    "max_answers": (1, 20), "dispute_resolve_blocks": (720, 34_560), "dispute_bond_bp": (100, 5000),
+    "block_reward_mP": (0, 10_000), "vote_blocks": (720, 17_280), "timelock_blocks": (360, 17_280),
+    "proposal_deposit_mP": (1000, 500_000),
+}
+LLM_VOTERS = ("n1", "n2", "n3", "n4")
+OPERATOR = "operator"
+
+
+@dataclass
+class Proposal:
+    proposal_id: str
+    proposer: str
+    kind: str  # param | policy | upgrade | seat
+    title: str
+    spec_hash: str
+    changes: list[dict[str, Any]]  # param: [{key, from, to}]; seat: [{key: "operator_seat", to}]
+    deposit_mP: int
+    created_height: int
+    vote_until: int
+    timelock_until: int | None = None
+    state: str = "VOTING"  # VOTING TIMELOCK APPROVED ACTIVATED IMPLEMENTING REJECTED EXPIRED VETOED
+    votes: dict[str, str] = field(default_factory=dict)  # voter -> yes | no | abstain
+    tally: dict[str, int] | None = None
+
+
 @dataclass
 class ToolListing:
     tool_id: str
@@ -194,6 +228,7 @@ class Board:
         self._heartbeats: set[tuple[str, int]] = set()
         self.tools: dict[tuple[str, int], ToolListing] = {}
         self.disputes: dict[str, Dispute] = {}
+        self.proposals: dict[str, Proposal] = {}
         self.ratings: dict[str, Rating] = {}
         self.licenses: set[tuple[str, str, int]] = set()  # (account, tool_id, version)
 
@@ -231,6 +266,8 @@ class Board:
             "licenses": sorted(self.licenses),
             "disputes": {k: asdict(v) for k, v in sorted(self.disputes.items())},
             "ratings": {k: asdict(v) for k, v in sorted(self.ratings.items())},
+            "proposals": {k: asdict(v) for k, v in sorted(self.proposals.items())},
+            "params": asdict(self.params),
         }
         return sha256_hex(canonical_json(state))
 
@@ -534,6 +571,108 @@ class Board:
         self._rep(subject, "rated", rating_id=r.rating_id, rater=rater, score=score)
         return r
 
+    # ---- governance (06 doc) ----
+
+    def voters(self) -> list[str]:
+        seats = [v for v in LLM_VOTERS if v in self.accounts]
+        if self.params.operator_seat and OPERATOR in self.accounts:
+            seats.append(OPERATOR)
+        return seats
+
+    @transaction
+    def create_proposal(self, proposer: str, kind: str, title: str, spec_hash: str,
+                        changes: list[dict[str, Any]]) -> Proposal:
+        p, h = self.params, self.height
+        if proposer not in self.voters():
+            raise BoardError("only voting accounts can propose")
+        if any(x.proposer == proposer and x.state in ("VOTING", "TIMELOCK") for x in self.proposals.values()):
+            raise BoardError("one open proposal per account")
+        if kind == "param":
+            if not changes:
+                raise BoardError("a param proposal needs changes")
+            resolved = []
+            for c in changes:
+                key, to = c.get("key"), c.get("to")
+                if key not in GOVERNABLE_PARAMS:
+                    raise BoardError(f"{key} is not a governable parameter (constitution or other kind)")
+                lo, hi = GOVERNABLE_PARAMS[key]
+                if not isinstance(to, int) or not lo <= to <= hi:
+                    raise BoardError(f"{key} must be an integer in [{lo}, {hi}]")
+                resolved.append({"key": key, "from": getattr(p, key), "to": to})
+            changes = resolved
+        elif kind == "seat":
+            if [c.get("key") for c in changes] != ["operator_seat"] or not isinstance(changes[0].get("to"), bool):
+                raise BoardError("seat proposals change only operator_seat (true/false)")
+            changes = [{"key": "operator_seat", "from": p.operator_seat, "to": changes[0]["to"]}]
+        elif kind in ("policy", "upgrade"):
+            changes = []
+        else:
+            raise BoardError("kind must be param, policy, upgrade or seat")
+        self._debit_to_escrow(self.account(proposer), p.proposal_deposit_mP)
+        prop = Proposal(self._new_id("p_", proposer, title), proposer, kind, title[:200], spec_hash,
+                        changes, p.proposal_deposit_mP, h, h + p.vote_blocks)
+        self.proposals[prop.proposal_id] = prop
+        return prop
+
+    @transaction
+    def vote(self, voter: str, proposal_id: str, choice: str, reason_hash: str) -> None:
+        prop = self.proposals.get(proposal_id)
+        if prop is None or prop.state != "VOTING":
+            raise BoardError("no proposal open for voting with that id")
+        if voter not in self.voters():
+            raise BoardError(f"{voter} has no vote")
+        if choice not in ("yes", "no", "abstain"):
+            raise BoardError("choice must be yes, no or abstain")
+        if not reason_hash:
+            raise BoardError("a vote needs a reason")
+        prop.votes[voter] = choice  # the last vote counts
+
+    @transaction
+    def veto_proposal(self, vetoer: str, proposal_id: str, reason_hash: str) -> None:
+        """Root veto during the timelock (constitutional; 06 doc 3.3). Signed by root."""
+        prop = self.proposals.get(proposal_id)
+        if prop is None or prop.state != "TIMELOCK":
+            raise BoardError("only proposals in their timelock can be vetoed")
+        prop.state = "VETOED"
+        self._burn_from_escrow(prop.deposit_mP)
+
+    def _tally(self, prop: Proposal) -> BoardEvent:
+        votes = list(prop.votes.values())
+        yes, no, abstain = votes.count("yes"), votes.count("no"), votes.count("abstain")
+        prop.tally = {"yes": yes, "no": no, "abstain": abstain, "seats": len(self.voters())}
+        cast = yes + no + abstain
+        if prop.kind == "seat":
+            quorum, passed = 4, (yes + no) > 0 and yes * 3 >= 2 * (yes + no)
+        elif prop.kind == "upgrade":
+            quorum, passed = 3, yes > no and yes >= 3
+        else:
+            quorum, passed = 3, yes > no
+        if cast < quorum:
+            prop.state = "EXPIRED"
+            self._pay_from_escrow(prop.proposer, prop.deposit_mP, lock=False)
+        elif not passed:
+            prop.state = "REJECTED"
+            if (yes + no) and no * 3 >= 2 * (yes + no):
+                self._burn_from_escrow(prop.deposit_mP)
+            else:
+                self._pay_from_escrow(prop.proposer, prop.deposit_mP, lock=False)
+        else:
+            prop.state = "TIMELOCK"
+            prop.timelock_until = self.height + self.params.timelock_blocks
+        return BoardEvent("proposal_tallied", None, {"proposal_id": prop.proposal_id,
+                                                     "state": prop.state, "tally": prop.tally})
+
+    def _approve(self, prop: Proposal) -> BoardEvent:
+        self._pay_from_escrow(prop.proposer, prop.deposit_mP, lock=False)
+        if prop.kind in ("param", "seat"):
+            for c in prop.changes:
+                setattr(self.params, c["key"], c["to"])
+            prop.state = "ACTIVATED"
+        else:
+            prop.state = "IMPLEMENTING"  # people implement and release (06 doc 4)
+        return BoardEvent("proposal_approved", None, {"proposal_id": prop.proposal_id,
+                                                      "state": prop.state, "changes": prop.changes})
+
     # ---- tool market (05 doc ch. 2–3, 01 doc 3.2) ----
 
     @transaction
@@ -653,6 +792,11 @@ class Board:
             ev = self._issue_epoch(h // self.params.epoch_blocks - 1)
             if ev:
                 events.append(ev)
+        for prop in self.proposals.values():
+            if prop.state == "VOTING" and h >= prop.vote_until:
+                events.append(self._tally(prop))
+            elif prop.state == "TIMELOCK" and prop.timelock_until is not None and h >= prop.timelock_until:
+                events.append(self._approve(prop))
         for d in self.disputes.values():
             if d.state == "open" and h >= d.deadline:
                 self._settle_dispute(d, "void", None)  # no ruling in time: bond returned

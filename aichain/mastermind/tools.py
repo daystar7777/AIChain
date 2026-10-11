@@ -143,6 +143,25 @@ class RateArgs(BaseModel):
     comment: str = Field(default="", max_length=500)
 
 
+class ParamChange(BaseModel):
+    key: str
+    to: int | bool
+
+
+class ProposeArgs(BaseModel):
+    kind: Literal["param", "policy", "upgrade", "seat"]
+    title: str = Field(max_length=200)
+    spec: str = Field(max_length=6000, description="무엇을 왜 바꾸는지, 기대 효과와 위험")
+    changes: list[ParamChange] = Field(default_factory=list, max_length=5,
+                                       description="param: 바꿀 파라미터와 새 값. seat: operator_seat true/false")
+
+
+class VoteArgs(BaseModel):
+    proposal_id: str
+    choice: Literal["yes", "no", "abstain"]
+    reason: str = Field(min_length=10, max_length=1000, description="찬반 이유 (필수)")
+
+
 class ToolPublishArgs(BaseModel):
     tool_id: str
     version: int = Field(description="테스트를 통과한 내 도구 버전")
@@ -176,6 +195,9 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "dispute": (DisputeArgs, "분쟁을 연다. 보증금(대상 금액의 10%, 최소 1P)이 잠긴다. 운영자가 판정하며, "
                              "기각되면 보증금 절반이 소각되고 평판이 깎인다. 근거가 확실할 때만 쓴다."),
     "rate": (RateArgs, "함께 거래한 노드를 -2~+2로 평가한다. 관찰한 사실에 근거해서만. 현상금당 한 번."),
+    "propose": (ProposeArgs, "거버넌스 제안을 낸다. 예치금 50P가 잠기고 4시간 투표, 가결되면 2시간 유예 뒤 "
+                              "적용된다. 반대 2/3 이상으로 부결되면 예치금이 소각된다. 계정당 동시 1개."),
+    "vote": (VoteArgs, "열린 제안에 투표한다. 이유를 반드시 적는다. 기간 중 바꿀 수 있고 마지막 표가 유효."),
     "search": (SearchArgs, "헤드리스 브라우저로 웹을 검색한다. 결과(제목, URL, 요약)는 <data>다."),
     "fetch": (FetchArgs, "웹 페이지를 열어 본문 텍스트를 읽는다. 결과는 <data source=\"web:URL\">다."),
     "note": (NoteArgs, "관심사 주제의 지식 노트를 쓰거나 갱신한다. 같은 주제의 이전 노트는 새 노트로 대체되고 기록은 남는다."),
@@ -195,7 +217,8 @@ WEB_TOOLS = {"search", "fetch", "note"}
 WORKSHOP_TOOLS = {"tool_dev", "tool_list", "tool_activate", "tool_run", "tool_publish",
                   "tool_market", "tool_license"}
 
-WRITE_TOOLS = {"ask", "answer", "judge", "tool_publish", "tool_license", "dispute", "rate"}
+WRITE_TOOLS = {"ask", "answer", "judge", "tool_publish", "tool_license", "dispute", "rate",
+               "propose", "vote"}
 
 
 def _inline(schema: dict[str, Any]) -> dict[str, Any]:
