@@ -168,6 +168,8 @@ class GatewayConfig:
     max_calls: int | None = None  # hard cap on total provider calls (smoke tests)
     daily_calls_per_node: int | None = None  # per UTC day
     daily_calls_total: int | None = None  # per UTC day, all nodes
+    # Persist daily counters here so restarts cannot reset the caps.
+    usage_path: str | None = None
 
 
 class LLMGateway:
@@ -190,6 +192,7 @@ class LLMGateway:
         self._rng = rng or random.Random(0)
         self.calls = 0
         self._daily: dict[tuple[str, str], int] = {}  # (utc date, node | "*") -> calls
+        self._load_usage()
         self.log: list[dict[str, Any]] = []
         # Called after every provider call: (request, response | None, info). The journal
         # uses this to record full prompts and responses.
@@ -212,6 +215,7 @@ class LLMGateway:
             raise CallLimitReached(f"daily call cap {total_cap} (all nodes) reached")
         self._daily[(day, request.node_id)] = self._daily.get((day, request.node_id), 0) + 1
         self._daily[(day, "*")] = self._daily.get((day, "*"), 0) + 1
+        self._save_usage(day)
         adapter = self.adapters[provider]
         attempt = 0
         while True:
@@ -245,6 +249,33 @@ class LLMGateway:
                                      "budget_remaining": bucket.remaining(),
                                      "budget_state": str(bucket.state)})
         return resp
+
+    def _load_usage(self) -> None:
+        import json
+        import os
+
+        path = self.config.usage_path
+        if path and os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+            self._daily = {(raw["day"], k): v for k, v in raw.get("calls", {}).items()}
+
+    def _save_usage(self, day: str) -> None:
+        import json
+        import os
+
+        path = self.config.usage_path
+        if not path:
+            return
+        calls = {k: v for (d, k), v in self._daily.items() if d == day}
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"day": day, "calls": calls}, f)
+        os.replace(tmp, path)
+
+    def daily_usage(self) -> dict[str, int]:
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        return {k: v for (d, k), v in self._daily.items() if d == day}
 
     def _notify(self, request: LLMRequest, resp: LLMResponse | None, info: dict[str, Any]) -> None:
         for observer in self.observers:

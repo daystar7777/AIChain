@@ -84,6 +84,7 @@ def build_network(
     daily_calls_per_node: int | None = None,
     daily_calls_total: int | None = None,
     workshop: Workshop | None = None,
+    usage_path: str | None = None,
 ) -> Network:
     adapters: dict[str, ProviderAdapter] = {}
     if provider == "scripted":
@@ -99,7 +100,8 @@ def build_network(
         raise ConfigError(f"unknown provider {provider}")
     gateway = LLMGateway(adapters, GatewayConfig(max_calls=max_calls,
                                                  daily_calls_per_node=daily_calls_per_node,
-                                                 daily_calls_total=daily_calls_total))
+                                                 daily_calls_total=daily_calls_total,
+                                                 usage_path=usage_path))
     net = Network(gateway, params or SHORT_PARAMS, trace=trace, echo=echo, web=web,
                   knowledge=knowledge, research_interval_blocks=research_interval_blocks,
                   workshop=workshop)

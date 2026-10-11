@@ -323,3 +323,24 @@ def test_parse_wikipedia_fallback():
     (hit,) = parse_wikipedia("en", payload, 5)
     assert hit == {"title": "Large language model", "snippet": "A large model",
                    "url": "https://en.wikipedia.org/wiki/Large_language_model"}
+
+
+def test_daily_caps_survive_restart(tmp_path):
+    class One:
+        name = "x"
+
+        def complete(self, request):
+            return LLMResponse("ok", [], Usage(1, 1))
+
+    path = str(tmp_path / "usage.json")
+    cfg = GatewayConfig(daily_calls_total=2, usage_path=path)
+    req = LLMRequest("a", "m", [Message("user", "hi")], [])
+    gw = LLMGateway({"x": One()}, cfg)
+    gw.register("a", TokenBucket(10**6, lambda: 0))
+    gw.chat("x", req, 3)
+    gw.chat("x", req, 3)
+    again = LLMGateway({"x": One()}, cfg)
+    again.register("a", TokenBucket(10**6, lambda: 0))
+    assert again.daily_usage() == {"a": 2, "*": 2}
+    with pytest.raises(CallLimitReached):
+        again.chat("x", req, 3)

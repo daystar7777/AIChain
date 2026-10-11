@@ -100,7 +100,8 @@ def main(argv: list[str] | None = None) -> int:
                 research_interval_blocks=interval,
                 daily_calls_per_node=args.daily_calls_per_node,
                 daily_calls_total=args.daily_calls_total,
-                workshop=make_workshop(args))
+                workshop=make_workshop(args),
+                usage_path=str(ROOT / "data" / "llm_usage.json"))
         except ConfigError as e:
             print(e, file=sys.stderr)
             return 2
