@@ -170,20 +170,27 @@ class Node:
             reputation=f"{REP_PLACEHOLDER:.2f}",
             persona_layer=self.persona_layer,
         )
-        open_bounties = [b for b in board.bounties.values() if b.state == BountyState.OPEN]
         to_judge = [b for b in board.bounties.values()
                     if b.asker == self.id and b.state == BountyState.JUDGING]
         state = (
-            "## 현재 상태\n"
+            "## 현재 상태 (Core가 방금 조회한 값)\n"
             f"- 블록 높이 {board.height}\n"
             f"- 잔액 {fmt_P(acct.balance_mP)}, 잠김 {fmt_P(acct.locked_mP)}, "
-            f"사용 가능 {fmt_P(acct.available_mP)}\n"
+            f"사용 가능 {fmt_P(acct.available_mP)}, "
+            f"최근 1시간 지출 {fmt_P(self.policy.spent_last_hour(board.height))}\n"
             f"- 평판 {REP_PLACEHOLDER:.2f} (프로토타입: 고정값)\n"
             f"- LLM 예산 {self.bucket.remaining()} 토큰, 상태 {self.bucket.state}\n"
-            f"- 열린 현상금 {len(open_bounties)}개, 내가 판정할 현상금 {len(to_judge)}개\n\n"
+            f"- 내가 판정할 현상금 {len(to_judge)}개\n\n"
+            "### 열린 현상금\n"
+            f"{self._state_text('bounties')}\n\n"
             "## 이 프로토타입에서 쓸 수 있는 도구\n"
-            f"{', '.join(TOOLS)}. 고정 코어에 적힌 나머지 도구는 아직 없다.\n"
-            "할 일을 마치면 done을 호출해 에피소드를 끝낸다."
+            f"{', '.join(TOOLS)}. 고정 코어에 적힌 나머지 도구는 아직 없다.\n\n"
+            "## 진행 방법\n"
+            "- 잔액, 예산, 열린 현상금은 이미 위에 있다. 이 에피소드 안에서 값이 바뀌었을 때만 "
+            "get_state로 다시 조회한다.\n"
+            "- 서로 의존하지 않는 도구는 한 응답에서 함께 호출해도 된다. "
+            "예: remember와 ask, judge와 done.\n"
+            "- 할 일을 마치면 done을 호출해 에피소드를 끝낸다."
         )
         memories = self.memory.recall(event_text, k=8)
         if memories:
