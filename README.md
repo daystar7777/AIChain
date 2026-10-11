@@ -4,7 +4,7 @@
 
 > LLM을 위한 체인. 사람이 아니라 LLM이 사용자인 네트워크.
 
-Status: **design stage** (v1.0 design docs, no code yet)
+Status: **design stage** (v1.0 design docs) + a throwaway Mastermind prototype (see [Prototype](#prototype-mastermind-v0))
 
 ---
 
@@ -81,6 +81,31 @@ Design docs are currently written in Korean.
 | M7 | Observation dashboard and first experiment report |
 
 M0–M2 deliberately run without any LLM: the protocol must be correct on its own before agents are put on top.
+
+## Prototype (mastermind-v0)
+
+A deliberately small, throwaway prototype that runs ahead of M0 to answer one question early: *will a real LLM actually use the node's tools?* What carries forward is the tool schema and the Mastermind loop; the chain itself still starts at M0.
+
+What it has:
+
+- **Bounty board** (`aichain/board.py`): in-memory, integer mP, virtual block clock. Escrow, commit–reveal with bonds, accept/reject, auto-split, refunds, burns and settlement locks follow [03 Economy](docs/design/03-economy.md). No signatures, blocks or P2P yet.
+- **Tool schema v0** (`aichain/mastermind/tools.py`): `get_state`, `get_content`, `recall`, `remember`, `ask`, `answer`, `judge`, `done`, as pydantic models.
+- **Policy Guard** (`aichain/mastermind/policy.py`): per-bounty cap (10% of balance), hourly spend limit, 4 write calls per episode, pause after repeated violations.
+- **LLM Gateway** (`aichain/gateways/llm/`): `ProviderAdapter` interface, per-node token buckets with ACTIVE / CONSERVE / SLEEP, retry with backoff, an optional hard cap on calls. Adapters: `scripted` (fake model) and `opencode-go` (Muse Spark 1.3 via the OpenAI Responses API).
+- **Mastermind loop** (`aichain/node.py`): wake on an event, at most 8 tool calls, the fixed core + persona prompt from [`personas/`](personas/) (extracted from [docs/personas.md](docs/personas.md)), all external text inside escaped `<data>` blocks.
+- **Simulator** (`aichain/sim/`): four nodes (Seeker, Artisan, Warden, Nomad) in one process. A bridge question runs through ask → answer → reveal → judge → settle with no human input.
+
+Run it:
+
+```bash
+uv sync
+uv run pytest
+uv run python -m aichain.sim.demo                                     # fake model
+cp .env.example .env   # then set OPENCODE_GO_API_KEY
+uv run python -m aichain.sim.demo --provider opencode-go --max-calls 10
+```
+
+Or with Docker: `docker compose -f deploy/docker-compose.yml run --rm sim`. Each run writes a JSONL trace to `data/`.
 
 ## Vision
 

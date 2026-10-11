@@ -1,0 +1,106 @@
+"""In-process network: one board, one content store, N nodes, a virtual block clock.
+
+Stands in for P2P + root PoA (milestones M0–M1) so the Mastermind loop can be tested
+end to end. One block = 5 seconds (720 blocks per hour, 02 doc).
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from typing import Any, TextIO
+
+from aichain.board import Board, BoardEvent, Params
+from aichain.content import ContentStore
+from aichain.gateways.llm.base import LLMGateway
+from aichain.node import EpisodeResult, Node, NodeConfig
+
+SECONDS_PER_BLOCK = 5
+
+
+class Network:
+    def __init__(self, gateway: LLMGateway, params: Params | None = None,
+                 trace: TextIO | None = None, echo: bool = False) -> None:
+        self.gateway = gateway
+        self.board = Board(params)
+        self.content = ContentStore()
+        self.content_author: dict[str, str] = {}
+        self.nodes: dict[str, Node] = {}
+        self.events: list[dict[str, Any]] = []
+        self.episodes: list[EpisodeResult] = []
+        self._trace = trace
+        self._echo = echo
+
+    def clock_minutes(self) -> float:
+        return self.board.height * SECONDS_PER_BLOCK / 60
+
+    def log(self, node: str, event: str, **data: Any) -> None:
+        entry = {"height": self.board.height, "node": node, "event": event, **data}
+        self.events.append(entry)
+        line = json.dumps(entry, ensure_ascii=False)
+        if self._trace:
+            self._trace.write(line + "\n")
+        if self._echo:
+            print(line, file=sys.stdout, flush=True)
+
+    def add_node(self, cfg: NodeConfig, grant_mP: int = 1_000_000) -> Node:
+        node = Node(cfg, self)
+        self.board.open_account(cfg.node_id, grant_mP)
+        self.nodes[cfg.node_id] = node
+        return node
+
+    def put_content(self, obj: Any, author: str) -> str:
+        h = self.content.put(obj)
+        self.content_author.setdefault(h, author)
+        return h
+
+    # ---- routing ----
+
+    def bridge_question(self, node_id: str, client: str, title: str, body: str,
+                        acceptance_criteria: str) -> None:
+        self.nodes[node_id].enqueue("bridge_question", {
+            "client": client, "title": title, "body": body,
+            "acceptance_criteria": acceptance_criteria})
+
+    def announce_bounty(self, bounty_id: str) -> None:
+        b = self.board.bounty(bounty_id)
+        for node in self.nodes.values():
+            if node.id == b.asker:
+                continue
+            interest = set(node.cfg.tags_interest)
+            if "*" in interest or interest & set(b.tags):
+                node.enqueue("bounty_new", {"bounty_id": bounty_id})
+
+    def dispatch(self, events: list[BoardEvent]) -> None:
+        for ev in events:
+            self.log("board", ev.kind, **ev.payload)
+            if ev.kind == "judge_due" and ev.to in self.nodes:
+                self.nodes[ev.to].enqueue("judge_due", ev.payload)
+            elif ev.kind == "bounty_settled":
+                for nid in ev.payload["participants"]:
+                    if nid in self.nodes:
+                        self.nodes[nid].on_settled(ev.payload)
+
+    # ---- running ----
+
+    def run_until_idle(self, max_rounds: int = 50) -> None:
+        for _ in range(max_rounds):
+            pending = [n for n in self.nodes.values() if n.has_pending]
+            if not pending:
+                return
+            for node in pending:
+                self.episodes.extend(node.run_pending())
+        raise RuntimeError("network did not go idle")
+
+    def advance(self, blocks: int) -> None:
+        for _ in range(blocks):
+            events = self.board.advance(1)
+            if events:
+                self.dispatch(events)
+            for node in self.nodes.values():
+                node.run_duties()
+            self.run_until_idle()
+
+    def balances(self) -> dict[str, dict[str, int]]:
+        return {nid: {"balance_mP": a.balance_mP, "locked_mP": a.locked_mP}
+                for nid, a in self.board.accounts.items()}

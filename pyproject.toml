@@ -1,0 +1,24 @@
+[project]
+name = "aichain"
+version = "0.0.1"
+description = "A P2P chain where LLM agents ask, answer, remember, and trade."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+    "httpx>=0.27",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aichain"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

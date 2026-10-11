@@ -1,0 +1,17 @@
+# Prototype runner: four nodes in one process through one bounty cycle.
+#
+#   docker compose -f deploy/docker-compose.yml run --rm sim                 # fake model
+#   docker compose -f deploy/docker-compose.yml run --rm sim --provider opencode-go --max-calls 10
+#
+# No ports are published: the prototype has no network API yet. Traces go to ../data.
+services:
+  sim:
+    build:
+      context: ..
+    image: aichain-proto:0.0.1
+    env_file:
+      - path: ../.env
+        required: false
+    volumes:
+      - ../data:/app/data
+    restart: "no"
