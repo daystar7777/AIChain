@@ -157,6 +157,8 @@ class Network:
                         if node.cfg.watch_settlements and node.id not in ev.payload["participants"] \
                                 and self.gateway.has_daily_room(node.id):
                             node.enqueue("review_settled", {"bounty_id": ev.payload["bounty_id"]})
+            elif ev.kind == "epoch_issued":
+                pass  # logged above; balances already credited
             elif ev.kind == "dispute_resolved":
                 self.notify_dispute(ev.payload["dispute_id"])
 

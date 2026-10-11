@@ -45,6 +45,10 @@ class Params:
     dispute_resolve_blocks: int = 2880
     dispute_bond_bp: int = 1000  # 10% of the target amount, at least 1P
     rating_dispute_blocks: int = 720
+    epoch_blocks: int = 720
+    block_reward_mP: int = 1000
+    reward_halving_blocks: int = 518_400
+    issuance: bool = True
     commit_bond_mP: int = 500
     max_answers: int = 5
     max_tags: int = 5
@@ -645,12 +649,51 @@ class Board:
             ev = self._transition(b, h)
             if ev:
                 events.append(ev)
+        if self.params.issuance and h > 0 and h % self.params.epoch_blocks == 0:
+            ev = self._issue_epoch(h // self.params.epoch_blocks - 1)
+            if ev:
+                events.append(ev)
         for d in self.disputes.values():
             if d.state == "open" and h >= d.deadline:
                 self._settle_dispute(d, "void", None)  # no ruling in time: bond returned
                 events.append(BoardEvent("dispute_resolved", None, {
                     "dispute_id": d.dispute_id, "ruling": "void", "reason": "deadline"}))
         return events
+
+    def _issue_epoch(self, epoch: int) -> BoardEvent | None:
+        """End-of-epoch issuance (03 doc 2.2): 60% uptime pool shared equally by accounts with a
+        heartbeat in the epoch, 40% contribution pool by confirmed income (max 50% each).
+        A pool with nobody eligible is not issued."""
+        p = self.params
+        start, end = epoch * p.epoch_blocks, (epoch + 1) * p.epoch_blocks
+        reward = p.epoch_blocks * (p.block_reward_mP >> (start // p.reward_halving_blocks))
+        if reward <= 0:
+            return None
+        uptime_pool, contrib_pool = reward * 6 // 10, reward - reward * 6 // 10
+        alive = sorted({e["account"] for e in self.rep_events
+                        if e["kind"] == "heartbeat" and e.get("epoch") == epoch})
+        income: dict[str, int] = {}
+        for e in self.rep_events:
+            if start <= e["height"] < end and e["kind"] in (
+                    "answer_accepted", "answer_auto", "tool_licensed", "tool_called"):
+                income[e["account"]] = income.get(e["account"], 0) + e.get("value_mP", 0)
+        paid: dict[str, int] = {}
+        if alive:
+            share = uptime_pool // len(alive)
+            for a in alive:
+                paid[a] = paid.get(a, 0) + share
+        total_income = sum(income.values())
+        if total_income > 0:
+            for a, inc in sorted(income.items()):
+                share = min(contrib_pool * inc // total_income, contrib_pool // 2)
+                paid[a] = paid.get(a, 0) + share
+        for a, amount in paid.items():
+            if amount > 0 and a in self.accounts:
+                self.accounts[a].balance_mP += amount
+                self.issued_mP += amount
+        if not paid:
+            return None
+        return BoardEvent("epoch_issued", None, {"epoch": epoch, "paid": paid})
 
     def _transition(self, b: Bounty, h: int) -> BoardEvent | None:
         p = self.params

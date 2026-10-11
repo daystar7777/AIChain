@@ -69,3 +69,29 @@ def test_heartbeats_every_epoch():
     net.advance(720 * 2)
     assert sum(1 for e in net.board.rep_events if e["kind"] == "heartbeat") == 8
     assert net.reputation("n1").terms_e6["U"] > 0
+
+
+def test_epoch_issuance_pools():
+    b = Board(Params())
+    for n in ("a", "b", "c"):
+        b.open_account(n, 0)
+    b.heartbeat("a", 0)
+    b.heartbeat("b", 0)
+    b.rep_events.append({"account": "c", "kind": "answer_accepted", "height": 10, "value_mP": 5000})
+    b.rep_events.append({"account": "a", "kind": "tool_called", "height": 20, "value_mP": 5000})
+    b.advance(720)
+    # 720P: uptime 432P split by a, b; contribution 288P split by income, capped at 144P each.
+    assert b.accounts["a"].balance_mP == 216_000 + 144_000
+    assert b.accounts["b"].balance_mP == 216_000
+    assert b.accounts["c"].balance_mP == 144_000
+    assert b.issued_mP == 720_000 and b.total_supply_check()
+
+
+def test_no_issuance_without_eligible_accounts_and_halving():
+    b = Board(Params(reward_halving_blocks=720))
+    b.open_account("a", 0)
+    b.advance(720)
+    assert b.issued_mP == 0  # nobody sent a heartbeat in epoch 0
+    b.heartbeat("a", 1)
+    b.advance(720)
+    assert b.accounts["a"].balance_mP == 720 * 500 * 6 // 10  # halved reward, uptime pool only
