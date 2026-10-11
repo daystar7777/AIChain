@@ -181,6 +181,8 @@ class Node:
             body_hash = self.net.put_content(body, author=self.id)
             self.net.board.reveal_answer(self.id, answer_id, body_hash, salt)
             del self._sealed[answer_id]
+            if self.net.chain is not None:
+                self.net.chain.delete_sealed(answer_id)
             self.net.log(self.id, "duty_reveal", answer_id=answer_id)
 
     def on_settled(self, payload: dict[str, Any]) -> None:
@@ -194,6 +196,13 @@ class Node:
         self.memory.remember(self.net.board.height, "episode", f"chain:{b.bounty_id}", 1.0, text,
                              tags=b.tags)
         self.net.log(self.id, "memory", kind="episode", source=f"chain:{b.bounty_id}", content=text)
+
+    def restore_from_chain(self) -> None:
+        """After a restart: reload sealed answers and re-raise judging duties missed while down."""
+        self._sealed.update(self.net.chain.sealed_for(self.id))
+        for b in self.net.board.bounties.values():
+            if b.asker == self.id and b.state == BountyState.JUDGING and b.accepted is None:
+                self.enqueue("judge_due", {"bounty_id": b.bounty_id})
 
     def check_budget_state(self) -> None:
         state = self.bucket.current_state()
@@ -537,6 +546,8 @@ class Node:
             body_hash = self.net.content.hash_of(body)
             ans = board.commit_answer(self.id, args.bounty_id, commitment_of(body_hash, salt, self.id))
             self._sealed[ans.answer_id] = (body, salt)
+            if self.net.chain is not None:
+                self.net.chain.put_sealed(self.id, ans.answer_id, body, salt)
             self.policy.record_write(0, h)
             return (f"답변 커밋됨: answer_id={ans.answer_id}, 보증금 "
                     f"{fmt_P(board.params.commit_bond_mP)} 잠김. 공개는 Core가 자동으로 한다.")

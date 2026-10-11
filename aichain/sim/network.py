@@ -16,6 +16,7 @@ from aichain.gateways.llm.base import LLMGateway
 from aichain.gateways.web import SearchGateway
 from aichain.memory import KnowledgeStore
 from aichain.workshop.registry import Workshop
+from aichain.chain.store import ChainStore, attach as attach_chain
 from aichain.node import EpisodeResult, Node, NodeConfig
 
 SECONDS_PER_BLOCK = 5
@@ -26,8 +27,10 @@ class Network:
                  trace: TextIO | None = None, echo: bool = False,
                  web: SearchGateway | None = None, knowledge: KnowledgeStore | None = None,
                  research_interval_blocks: int | None = None,
-                 workshop: Workshop | None = None) -> None:
+                 workshop: Workshop | None = None,
+                 chain: ChainStore | None = None) -> None:
         self.gateway = gateway
+        self.chain = chain
         self.workshop = workshop
         self.web = web
         self.knowledge = knowledge
@@ -35,8 +38,15 @@ class Network:
         self.research_interval_blocks = research_interval_blocks
         self.board = Board(params)
         self.content = ContentStore()
+        self.chain_stats: dict[str, int] | None = None
         self.content_author: dict[str, str] = {}
         self.nodes: dict[str, Node] = {}
+        if chain is not None:
+            for h, author, obj in chain.all_content():
+                self.content.put(obj)
+                if author:
+                    self.content_author.setdefault(h, author)
+            self.chain_stats = attach_chain(self.board, chain)
         self.events: list[dict[str, Any]] = []
         self.episodes: list[EpisodeResult] = []
         self._trace = trace
@@ -64,13 +74,18 @@ class Network:
 
     def add_node(self, cfg: NodeConfig, grant_mP: int = 1_000_000) -> Node:
         node = Node(cfg, self)
-        self.board.open_account(cfg.node_id, grant_mP)
+        if cfg.node_id not in self.board.accounts:  # already there when the chain was replayed
+            self.board.open_account(cfg.node_id, grant_mP)
         self.nodes[cfg.node_id] = node
+        if self.chain is not None:
+            node.restore_from_chain()
         return node
 
     def put_content(self, obj: Any, author: str) -> str:
         h = self.content.put(obj)
         self.content_author.setdefault(h, author)
+        if self.chain is not None:
+            self.chain.put_content(h, obj, author)
         return h
 
     # ---- routing ----

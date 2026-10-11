@@ -13,6 +13,7 @@ from aichain.gateways.llm.scripted import Brain, ScriptedAdapter
 from aichain.gateways.web import SearchGateway
 from aichain.memory import KnowledgeStore
 from aichain.workshop.registry import Workshop
+from aichain.chain.store import ChainStore
 from aichain.node import NodeConfig
 from aichain.sim.brains import persona_brain
 from aichain.sim.network import Network
@@ -99,6 +100,7 @@ def build_network(
     daily_calls_total: int | None = None,
     workshop: Workshop | None = None,
     usage_path: str | None = None,
+    chain: "ChainStore | None" = None,
 ) -> Network:
     adapters: dict[str, ProviderAdapter] = {}
     if provider == "scripted":
@@ -118,7 +120,7 @@ def build_network(
                                                  usage_path=usage_path))
     net = Network(gateway, params or SHORT_PARAMS, trace=trace, echo=echo, web=web,
                   knowledge=knowledge, research_interval_blocks=research_interval_blocks,
-                  workshop=workshop)
+                  workshop=workshop, chain=chain)
     for cfg in default_nodes(provider, model, nomad_model, interests):
         net.add_node(cfg)
     return net

@@ -24,6 +24,7 @@ from aichain.bridge.tokens import DEFAULT_FILE, TokenStore
 from aichain import setup as node_setup
 from aichain.journal.store import Journal
 from aichain.memory import KnowledgeStore
+from aichain.chain.store import ChainStore
 from aichain.sim.demo import make_workshop
 from aichain.sim.factory import (
     ROOT,
@@ -64,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--research-minutes", type=float, default=30.0)
     ap.add_argument("--browser", default=None)
     ap.add_argument("--knowledge", type=Path, default=ROOT / "data" / "knowledge" / "knowledge.db")
+    ap.add_argument("--chain", type=Path, default=ROOT / "data" / "chain" / "chain.db",
+                    help="persistent chain log (balances, bounties survive restarts)")
     ap.add_argument("--nodes-file", type=Path, default=ROOT / "data" / "nodes.json")
     ap.add_argument("--daily-calls-per-node", type=int, default=50)
     ap.add_argument("--daily-calls-total", type=int, default=200)
@@ -102,7 +105,8 @@ def main(argv: list[str] | None = None) -> int:
                 daily_calls_per_node=args.daily_calls_per_node,
                 daily_calls_total=args.daily_calls_total,
                 workshop=make_workshop(args),
-                usage_path=str(ROOT / "data" / "llm_usage.json"))
+                usage_path=str(ROOT / "data" / "llm_usage.json"),
+                chain=ChainStore(args.chain))
         except ConfigError as e:
             print(e, file=sys.stderr)
             return 2
@@ -115,6 +119,9 @@ def main(argv: list[str] | None = None) -> int:
             journal.attach(net)
         runtime = NetworkRuntime(net, block_seconds=args.block_seconds)
         print(f"trace: {trace_path}", file=sys.stderr)
+        print(f"chain replayed: {net.chain_stats}", file=sys.stderr)
+        if journal:
+            net.log("core", "chain_replayed", **(net.chain_stats or {}))
         try:
             uvicorn.run(create_app(runtime, tokens), host=args.host, port=args.port, log_level="info")
         finally:

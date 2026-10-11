@@ -8,11 +8,13 @@ All amounts are integer mP.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import functools
+import inspect
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Callable
 
-from aichain.common import sha256_hex
+from aichain.common import canonical_json, sha256_hex
 
 
 class BoardError(Exception):
@@ -100,6 +102,25 @@ class BoardEvent:
     payload: dict[str, Any]
 
 
+def transaction(method):
+    """Mark a state-changing Board method: after it succeeds, its arguments are handed to the
+    recorder (the chain log), so the state can be rebuilt by replaying the same calls."""
+    sig = inspect.signature(method)
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        result = method(self, *args, **kwargs)
+        if self.recorder is not None:
+            bound = sig.bind(self, *args, **kwargs)
+            bound.apply_defaults()
+            body = {k: v for k, v in bound.arguments.items() if k != "self"}
+            self.recorder(method.__name__, body)
+        return result
+
+    wrapper.is_transaction = True
+    return wrapper
+
+
 def commitment_of(body_hash: str, salt: str, author: str) -> str:
     return sha256_hex(f"{body_hash}{salt}{author}")
 
@@ -116,9 +137,12 @@ class Board:
         self.issued_mP = 0
         self.rep_events: list[dict[str, Any]] = []
         self._seq = 0
+        # Called as recorder(tx_type, body) after each successful transaction (see `transaction`).
+        self.recorder: Callable[[str, dict[str, Any]], None] | None = None
 
     # ---- accounts ----
 
+    @transaction
     def open_account(self, account_id: str, grant_mP: int) -> Account:
         if account_id in self.accounts:
             raise BoardError(f"account {account_id} exists")
@@ -126,6 +150,27 @@ class Board:
         self.accounts[account_id] = acct
         self.issued_mP += grant_mP
         return acct
+
+    def apply(self, tx_type: str, body: dict[str, Any]) -> Any:
+        """Re-apply a recorded transaction (replay)."""
+        method = getattr(self, tx_type, None)
+        if method is None or not getattr(method, "is_transaction", False):
+            raise BoardError(f"unknown transaction type {tx_type}")
+        return method(**body)
+
+    def state_root(self) -> str:
+        """Hash of the whole consensus state; equal on every honest replay (03/01 docs)."""
+        state = {
+            "height": self.height, "escrow": self.escrow_mP, "burned": self.burned_mP,
+            "issued": self.issued_mP, "seq": self._seq,
+            "accounts": {k: [a.balance_mP, a.locked_mP, sorted(a.locks)]
+                         for k, a in sorted(self.accounts.items())},
+            "bounties": {k: {**asdict(b), "state": str(b.state),
+                             "outcome": str(b.outcome) if b.outcome else None}
+                         for k, b in sorted(self.bounties.items())},
+            "answers": {k: asdict(a) for k, a in sorted(self.answers.items())},
+        }
+        return sha256_hex(canonical_json(state))
 
     def account(self, account_id: str) -> Account:
         try:
@@ -166,6 +211,7 @@ class Board:
 
     # ---- transactions ----
 
+    @transaction
     def create_bounty(
         self,
         asker: str,
@@ -212,6 +258,7 @@ class Board:
         except KeyError:
             raise BoardError(f"unknown bounty {bounty_id}") from None
 
+    @transaction
     def commit_answer(self, author: str, bounty_id: str, commitment: str) -> Answer:
         b = self.bounty(bounty_id)
         if b.state != BountyState.OPEN:
@@ -234,6 +281,7 @@ class Board:
         b.answers.append(ans.answer_id)
         return ans
 
+    @transaction
     def reveal_answer(self, author: str, answer_id: str, body_hash: str, salt: str) -> None:
         ans = self.answers.get(answer_id)
         if ans is None or ans.author != author:
@@ -261,6 +309,7 @@ class Board:
             raise BoardError(f"{answer_id} is not a revealed answer of this bounty")
         return b, ans
 
+    @transaction
     def reject_answer(self, asker: str, bounty_id: str, answer_id: str, reason: str) -> None:
         _, ans = self._judgeable(asker, bounty_id, answer_id)
         if ans.rejected_reason is not None:
@@ -268,6 +317,7 @@ class Board:
         ans.rejected_reason = reason or "(no reason)"
         self._rep(ans.author, "answer_rejected", bounty_id=bounty_id)
 
+    @transaction
     def accept_answer(self, asker: str, bounty_id: str, answer_id: str) -> list[BoardEvent]:
         b, ans = self._judgeable(asker, bounty_id, answer_id)
         if ans.rejected_reason is not None:
