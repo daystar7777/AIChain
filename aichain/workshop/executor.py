@@ -101,3 +101,85 @@ class LocalDevExecutor:
         except (ValueError, KeyError) as e:
             raise ExecutionFailed("tool produced no JSON result") from e
         return ExecResult(out, int((time.monotonic() - started) * 1000))
+
+
+# Each call runs in a fresh transient unit created by systemd (as root, so no user namespaces
+# are needed): throwaway user, no network at all, read-only system, no access to AIChain data,
+# capped memory/tasks/time. See docs/notes/tool-execution-isolation.md (option A).
+SYSTEMD_PROPERTIES = [
+    "DynamicUser=yes",
+    "PrivateNetwork=yes",
+    "IPAddressDeny=any",
+    "RestrictAddressFamilies=none",
+    "ProtectSystem=strict",
+    "ProtectHome=yes",
+    "PrivateTmp=yes",
+    "PrivateDevices=yes",
+    "PrivateUsers=yes",
+    "NoNewPrivileges=yes",
+    "CapabilityBoundingSet=",
+    "AmbientCapabilities=",
+    "SystemCallFilter=@system-service",
+    "SystemCallFilter=~@privileged @mount @debug @module @raw-io @reboot @swap @cpu-emulation @obsolete",
+    "SystemCallArchitectures=native",
+    "ProtectKernelTunables=yes",
+    "ProtectKernelModules=yes",
+    "ProtectKernelLogs=yes",
+    "ProtectControlGroups=yes",
+    "ProtectClock=yes",
+    "ProtectHostname=yes",
+    "ProtectProc=invisible",
+    "ProcSubset=pid",
+    "RestrictNamespaces=yes",
+    "RestrictRealtime=yes",
+    "RestrictSUIDSGID=yes",
+    "LockPersonality=yes",
+    "MemoryDenyWriteExecute=yes",
+    "UMask=0077",
+    "TasksMax=64",
+    "LimitNOFILE=64",
+    "CPUQuota=100%",
+    "MemorySwapMax=0",
+    "InaccessiblePaths=-/opt/aichain -/opt/aichain-browser -/root -/home -/var/lib/aichain-browser "
+    "-/run/aichain-egress -/run/aichain-browser -/etc/ssh",
+]
+
+
+class SystemdExecutor:
+    name = "systemd-transient"
+
+    def __init__(self, python: str = "/usr/bin/python3", systemd_run: str = "/usr/bin/systemd-run") -> None:
+        if not sys.platform.startswith("linux") or os.geteuid() != 0:
+            raise ExecutionDisabled("SystemdExecutor needs Linux and root (it creates transient units)")
+        if not os.path.exists(systemd_run):
+            raise ExecutionDisabled(f"{systemd_run} not found")
+        self.python = python
+        self.systemd_run = systemd_run
+
+    def command(self, timeout_s: int, memory_mb: int) -> list[str]:
+        props = SYSTEMD_PROPERTIES + [f"MemoryMax={memory_mb}M", f"RuntimeMaxSec={timeout_s}"]
+        cmd = [self.systemd_run, "--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"]
+        for p in props:
+            cmd += ["-p", p]
+        return cmd + ["--", self.python, "-I", "-S", "-c", _RUNNER]
+
+    def run(self, code: str, input: dict[str, Any], timeout_s: int, memory_mb: int,
+            tool_id: str = "tool") -> ExecResult:
+        import time
+
+        started = time.monotonic()
+        req = json.dumps({"code": code, "input": input, "timeout_s": timeout_s,
+                          "memory_mb": memory_mb, "tool_id": tool_id})
+        try:
+            proc = subprocess.run(self.command(timeout_s, memory_mb), input=req, text=True,
+                                  capture_output=True, timeout=timeout_s + 10)
+        except subprocess.TimeoutExpired as e:
+            raise ExecutionFailed(f"timed out after {timeout_s}s") from e
+        if proc.returncode != 0:
+            err = (proc.stderr or "").strip().splitlines()
+            raise ExecutionFailed(err[-1][:300] if err else f"exit code {proc.returncode}")
+        try:
+            out = json.loads(proc.stdout)["ok"]
+        except (ValueError, KeyError) as e:
+            raise ExecutionFailed("tool produced no JSON result") from e
+        return ExecResult(out, int((time.monotonic() - started) * 1000))
