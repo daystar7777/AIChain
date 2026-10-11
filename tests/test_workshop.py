@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 
 import pytest
 
@@ -22,6 +24,9 @@ TESTS = [ToolTest(input={"text": "a b c"}, expected={"words": 3}),
 
 @pytest.fixture
 def dev_exec(monkeypatch):
+    # Executing code without isolation is for the developer workstation only, never the server.
+    if not sys.platform.startswith("darwin") and os.environ.get("AICHAIN_DEV_EXEC_TESTS") != "1":
+        pytest.skip("code-execution tests run only on a development Mac")
     monkeypatch.setenv("AICHAIN_UNSAFE_LOCAL_EXEC", "1")
     return LocalDevExecutor()
 
