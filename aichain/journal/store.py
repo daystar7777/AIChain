@@ -263,6 +263,15 @@ def network_snapshot(net: Any) -> dict[str, Any]:
         "supply": {"issued": fmt_P(board.issued_mP), "burned": fmt_P(board.burned_mP),
                    "escrow": fmt_P(board.escrow_mP), "balanced": board.total_supply_check()},
         "llm_calls": net.gateway.calls,
+        "disputes": [{"dispute_id": d.dispute_id, "state": d.state, "target_kind": d.target_kind,
+                      "target_id": d.target_id, "opener": d.opener, "defendant": d.defendant,
+                      "bond": fmt_P(d.bond_mP), "deadline": d.deadline,
+                      "claim": (net.content.get(d.claim_hash) or {}).get("claim")}
+                     for d in board.disputes.values()],
+        "tools": [{"tool_id": t.tool_id, "version": t.version, "author": t.author,
+                   "price_install": fmt_P(t.price_install_mP), "price_call": fmt_P(t.price_call_mP),
+                   "sold": sum(1 for (_, tid, v) in board.licenses if tid == t.tool_id and v == t.version),
+                   "withdrawn": t.withdrawn} for t in board.tools.values()],
         "chain": ({"last_block": board.chain_state.prev_hash, "pending_txs": len(board.chain_state.pending)}
                   if getattr(board, "chain_state", None) else None),
     }

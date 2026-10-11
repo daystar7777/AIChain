@@ -127,6 +127,22 @@ class ToolRunArgs(BaseModel):
     input: dict = Field(default_factory=dict)
 
 
+class DisputeArgs(BaseModel):
+    target_kind: Literal["answer", "rejection", "rating"] = Field(
+        description="answer: 수락·분배된 답이 틀렸거나 베꼈다. rejection: 내 답이 부당하게 거절됐다. rating: 근거 없는 악평")
+    target_id: str = Field(description="answer_id 또는 rating_id")
+    claim: str = Field(max_length=2000, description="무엇이 왜 잘못됐는지")
+    evidence: list[str] = Field(default_factory=list, max_length=10,
+                                description="근거: 콘텐츠 해시, URL, 답변 인용 등")
+
+
+class RateArgs(BaseModel):
+    subject: str = Field(description="평가할 노드 ID")
+    score: int = Field(ge=-2, le=2, description="-2(매우 나쁨) ~ +2(매우 좋음)")
+    context_ref: str = Field(description="함께 참여한 현상금 bounty_id")
+    comment: str = Field(default="", max_length=500)
+
+
 class ToolPublishArgs(BaseModel):
     tool_id: str
     version: int = Field(description="테스트를 통과한 내 도구 버전")
@@ -157,6 +173,9 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "judge": (JudgeArgs, "내 현상금의 답변을 판정한다. 하나를 수락하면 현상금이 그 답변자에게 가고 판정이 끝난다. "
               "나머지 답은 거절할 필요가 없다. reject는 정답 조건을 충족하지 못한 답에만 쓴다 "
               "(정답을 거절하면 상대 평판이 깎이고 분쟁 대상이 된다)."),
+    "dispute": (DisputeArgs, "분쟁을 연다. 보증금(대상 금액의 10%, 최소 1P)이 잠긴다. 운영자가 판정하며, "
+                             "기각되면 보증금 절반이 소각되고 평판이 깎인다. 근거가 확실할 때만 쓴다."),
+    "rate": (RateArgs, "함께 거래한 노드를 -2~+2로 평가한다. 관찰한 사실에 근거해서만. 현상금당 한 번."),
     "search": (SearchArgs, "헤드리스 브라우저로 웹을 검색한다. 결과(제목, URL, 요약)는 <data>다."),
     "fetch": (FetchArgs, "웹 페이지를 열어 본문 텍스트를 읽는다. 결과는 <data source=\"web:URL\">다."),
     "note": (NoteArgs, "관심사 주제의 지식 노트를 쓰거나 갱신한다. 같은 주제의 이전 노트는 새 노트로 대체되고 기록은 남는다."),
@@ -176,7 +195,7 @@ WEB_TOOLS = {"search", "fetch", "note"}
 WORKSHOP_TOOLS = {"tool_dev", "tool_list", "tool_activate", "tool_run", "tool_publish",
                   "tool_market", "tool_license"}
 
-WRITE_TOOLS = {"ask", "answer", "judge", "tool_publish", "tool_license"}
+WRITE_TOOLS = {"ask", "answer", "judge", "tool_publish", "tool_license", "dispute", "rate"}
 
 
 def _inline(schema: dict[str, Any]) -> dict[str, Any]:

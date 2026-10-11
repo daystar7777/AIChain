@@ -103,6 +103,7 @@ details > summary { cursor: pointer; }
   <div>
     <section><h2>노드</h2><div id="nodes" class="nodes"><div class="empty">데이터 없음</div></div></section>
     <section><h2>현상금 보드</h2><div id="bounties"><div class="empty">현상금 없음</div></div></section>
+    <section><h2>분쟁 · 도구 시장</h2><div id="market"><div class="empty">없음</div></div></section>
     <section><h2>지식 <span id="kTabs" class="ktabs"></span></h2><div id="knowledge"><div class="empty">지식 노트 없음</div></div></section>
   </div>
   <div>
@@ -140,6 +141,11 @@ const KIND = {
   skip_event: ["이벤트 건너뜀", "warn"], runtime_error: ["오류", "bad"], bridge_linked: ["브릿지 연결", ""],
   web_search: ["웹 검색", "llm"], web_fetch: ["페이지 읽기", "llm"], web_error: ["웹 오류", "bad"],
   knowledge: ["지식 노트", "ok"],
+  dispute_opened: ["분쟁 제기", "warn"], dispute_state: ["분쟁 상태", "warn"], dispute_resolved: ["분쟁 판정", "ok"],
+  rated: ["평가", ""], tool_published: ["도구 등록", "ok"], tool_licensed: ["라이선스 구매", "ok"],
+  tool_used: ["도구 사용료", ""], tool_defined: ["도구 정의", ""], tool_activated: ["도구 활성화", ""],
+  chain_replayed: ["체인 재생", ""], episode_error: ["에피소드 오류", "bad"], tool_error: ["도구 오류", "bad"],
+  memory_error: ["기억 오류", "bad"], busy: ["처리 지연", "warn"],
 };
 const GROUPS = {
   core: k => k !== "llm_call" && k !== "llm_text",
@@ -191,6 +197,14 @@ function describe(e) {
     case "web_search": return `"${esc(d.query)}" → 결과 ${d.results}개${d.cached ? " (캐시)" : ""} · ${d.elapsed_ms ?? "-"}ms`;
     case "web_fetch": return `${esc(short(d.title || "", 60))} <span class="meta">${esc(short(d.url, 90))}</span> · ${d.chars}자 · ${d.elapsed_ms ?? "-"}ms${d.blocked_requests ? ` · 차단된 하위요청 ${d.blocked_requests}` : ""}`;
     case "web_error": return `<b>${esc(d.tool)}</b> ${d.blocked ? "[차단] " : ""}${esc(short(d.error))}`;
+    case "dispute_opened": return `${esc(d.target_kind)} ${esc(d.target_id)} → 피고 ${esc(d.defendant)}, 보증금 ${esc(d.bond)} — ${esc(short(d.claim, 120))}`;
+    case "dispute_state": return `${esc(d.dispute_id)} <b>${esc(d.state)}</b> (${esc(d.opener)} → ${esc(d.defendant)})`;
+    case "dispute_resolved": return `${esc(d.dispute_id)} → <b>${esc(d.ruling)}</b> ${esc(short(d.note, 100))}`;
+    case "rated": return `${esc(d.subject)} ${d.score > 0 ? "+" : ""}${d.score} (${esc(d.context_ref)}) ${esc(short(d.comment, 80))}`;
+    case "tool_published": return `${esc(d.tool_id)} v${d.version} · 라이선스 ${esc(d.price_install)} · 호출 ${esc(d.price_call)}`;
+    case "tool_licensed": case "tool_used": return `${esc(d.tool_id)} v${d.version} → ${esc(d.author)} ${esc(d.paid)}`;
+    case "chain_replayed": return `거래 ${d.transactions} · 블록 ${d.blocks} · 높이 ${d.height}`;
+    case "episode_error": case "tool_error": case "memory_error": return esc(short(d.error, 200));
     case "knowledge": return `<b>${esc(d.topic)}</b> v${d.version} · 사실 ${d.facts}개 · 확신 ${d.confidence}`;
     default: return esc(short(JSON.stringify(d), 200));
   }
@@ -290,10 +304,21 @@ function renderState(s) {
   }).join("") || '<div class="empty">현상금 없음</div>';
 }
 
+function renderMarket(s) {
+  const ds = (s.disputes || []).slice().reverse().map(d => `<div class="answer ${d.state === "upheld" ? "accepted" : d.state === "rejected" ? "rejected" : ""}">
+    <b>${esc(d.dispute_id)}</b> <span class="chip ${d.state === "open" ? "warn" : ""}">${esc(d.state)}</span>
+    ${esc(d.target_kind)} · ${esc(d.opener)} → ${esc(d.defendant)} · 보증금 ${esc(d.bond)} · 기한 #${d.deadline}
+    <div class="meta">${esc(short(d.claim, 160))}</div></div>`).join("");
+  const ts = (s.tools || []).map(t => `<div class="answer">${esc(t.tool_id)} v${t.version} · ${esc(t.author)}
+    · 라이선스 ${esc(t.price_install)} · 호출 ${esc(t.price_call)} · 판매 ${t.sold}${t.withdrawn ? " · 판매중단" : ""}</div>`).join("");
+  $("market").innerHTML = (ds ? `<div class="meta">분쟁</div>${ds}` : "") + (ts ? `<div class="meta">도구</div>${ts}` : "")
+    || '<div class="empty">분쟁·도구 없음</div>';
+}
+
 async function loadState() {
   if (runId == null) return;
   const r = await fetch(`/api/runs/${runId}/state`);
-  if (r.ok) renderState(await r.json());
+  if (r.ok) { const st = await r.json(); renderState(st); renderMarket(st); }
 }
 
 async function openEpisode(ep) {

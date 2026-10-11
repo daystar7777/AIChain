@@ -14,6 +14,7 @@ and the node decides by itself whether to post a bounty.
 # No `from __future__ import annotations`: FastAPI must evaluate the Annotated[...,
 # Depends(local_function)] hints at definition time.
 import asyncio
+import hmac
 import json
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, AsyncIterator
@@ -38,8 +39,14 @@ class QuestionIn(BaseModel):
 _bearer = HTTPBearer(auto_error=False)
 
 
+class RulingIn(BaseModel):
+    ruling: str = Field(pattern="^(uphold|reject|void)$")
+    note: str = Field(default="", max_length=2000)
+
+
 def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bool = True,
-               sse_poll_seconds: float = 0.5, sse_keepalive_seconds: float = 15.0) -> FastAPI:
+               sse_poll_seconds: float = 0.5, sse_keepalive_seconds: float = 15.0,
+               admin_token: str | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if start_runtime:
@@ -128,6 +135,53 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
 
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # ---- operator (root) endpoints: dispute rulings (03 doc 3.4) ----
+
+    def operator(creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)]) -> None:
+        if not admin_token or creds is None or not hmac.compare_digest(creds.credentials, admin_token):
+            raise HTTPException(401, "operator token required", headers={"WWW-Authenticate": "Bearer"})
+
+    def dispute_view(net: Any, d: Any) -> dict[str, Any]:
+        board = net.board
+        target: dict[str, Any] = {}
+        if d.target_kind in ("answer", "rejection") and d.target_id in board.answers:
+            a = board.answers[d.target_id]
+            b = board.bounty(a.bounty_id)
+            target = {"bounty_id": b.bounty_id, "outcome": str(b.outcome),
+                      "question": net.content.get(b.question_hash),
+                      "answer": net.content.get(a.body_hash) if a.body_hash else None,
+                      "author": a.author, "accepted": b.accepted == a.answer_id,
+                      "rejected_reason": a.rejected_reason}
+        elif d.target_kind == "rating" and d.target_id in board.ratings:
+            r = board.ratings[d.target_id]
+            target = {"rater": r.rater, "subject": r.subject, "score": r.score, "context_ref": r.context_ref}
+        return {"dispute_id": d.dispute_id, "state": d.state, "target_kind": d.target_kind,
+                "target_id": d.target_id, "opener": d.opener, "defendant": d.defendant,
+                "bond_mP": d.bond_mP, "opened_height": d.opened_height, "deadline": d.deadline,
+                "height": board.height, "claim": net.content.get(d.claim_hash), "target": target}
+
+    @app.get("/admin/v1/disputes", dependencies=[Depends(operator)])
+    def list_disputes(state: str | None = "open") -> list[dict[str, Any]]:
+        return runtime.call(lambda net: [dispute_view(net, d) for d in net.board.disputes.values()
+                                         if state in (None, "all") or d.state == state])
+
+    @app.post("/admin/v1/disputes/{dispute_id}/resolve", dependencies=[Depends(operator)])
+    def resolve(dispute_id: str, body: RulingIn) -> dict[str, Any]:
+        def act(net: Any) -> dict[str, Any]:
+            from aichain.board import BoardError
+
+            note_hash = net.put_content({"ruling": body.ruling, "note": body.note}, author="operator")
+            try:
+                d = net.board.resolve_dispute("root", dispute_id, body.ruling, note_hash)
+            except BoardError as e:
+                raise HTTPException(409, str(e)) from e
+            net.log("operator", "dispute_resolved", dispute_id=dispute_id, ruling=body.ruling,
+                    note=body.note[:300])
+            net.notify_dispute(dispute_id)
+            return dispute_view(net, d)
+
+        return runtime.call(act)
 
     @app.get("/bridge/v1/network")
     def network(client: Annotated[Client, Depends(client_of)]) -> dict[str, Any]:

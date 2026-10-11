@@ -37,11 +37,11 @@ def test_full_cycle_without_human_input():
         980_000, 1_020_000, 1_000_000)
     assert all(a.locked_mP == 0 for a in acct.values())
     assert net.board.total_supply_check()
-    # Warden was never woken; four episodes, one call each.
+    # Warden only wakes to review the settled bounty; five episodes, one call each.
     assert [(e.node_id, e.event, e.stopped) for e in net.episodes] == [
         ("n1", "bridge_question", "done"), ("n2", "bounty_new", "done"),
-        ("n4", "bounty_new", "done"), ("n1", "judge_due", "done")]
-    assert len(adapter.requests) == 4
+        ("n4", "bounty_new", "done"), ("n1", "judge_due", "done"), ("n3", "review_settled", "done")]
+    assert len(adapter.requests) == 5
     # Settlement became a chain-sourced memory for participants.
     assert any(m.source == f"chain:{b.bounty_id}" for m in net.nodes["n2"].memory.records)
     assert any(m.kind == "relation" for m in net.nodes["n1"].memory.records)

@@ -94,6 +94,18 @@ class Network:
             node.restore_from_chain()
         return node
 
+    def notify_dispute(self, dispute_id: str) -> None:
+        """Core memory for both parties (no LLM call): opened or resolved."""
+        d = self.board.disputes[dispute_id]
+        text = (f"분쟁 {d.dispute_id} ({d.target_kind} {d.target_id}): 제기 {d.opener}, 피고 {d.defendant}, "
+                f"상태 {d.state}")
+        for nid in (d.opener, d.defendant):
+            if nid in self.nodes:
+                self.nodes[nid].memory.remember(self.board.height, "episode", f"chain:{d.dispute_id}",
+                                                1.0, text, tags=["dispute"])
+        self.log("core", "dispute_state", dispute_id=d.dispute_id, state=d.state,
+                 opener=d.opener, defendant=d.defendant)
+
     def reputation(self, account: str) -> Reputation:
         """Deterministic reputation (03 doc 4.3), cached until height or events change."""
         key = (account, self.board.height, len(self.board.rep_events))
@@ -140,6 +152,13 @@ class Network:
                 for nid in ev.payload["participants"]:
                     if nid in self.nodes:
                         self.nodes[nid].on_settled(ev.payload)
+                if ev.payload["outcome"] in ("PAID", "AUTO_SPLIT", "REFUNDED"):
+                    for node in self.nodes.values():
+                        if node.cfg.watch_settlements and node.id not in ev.payload["participants"] \
+                                and self.gateway.has_daily_room(node.id):
+                            node.enqueue("review_settled", {"bounty_id": ev.payload["bounty_id"]})
+            elif ev.kind == "dispute_resolved":
+                self.notify_dispute(ev.payload["dispute_id"])
 
     # ---- running ----
 

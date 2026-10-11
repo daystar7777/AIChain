@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 BLOCKS_PER_HOUR = 720
+BLOCKS_PER_DAY = 17_280
 
 
 class PolicyViolation(Exception):
@@ -19,6 +20,7 @@ class PolicyLimits:
     hourly_spend_cap_mP: int = 200_000  # 200P
     bounty_ratio_bp: int = 1000  # 10% of balance per bounty
     writes_per_episode: int = 4
+    disputes_per_day: int = 5
     pause_after_violations: int = 10
 
 
@@ -27,6 +29,8 @@ class PolicyGuard:
     node_id: str
     limits: PolicyLimits = field(default_factory=PolicyLimits)
     spends: list[tuple[int, int]] = field(default_factory=list)  # (height, amount_mP)
+    disputes: list[int] = field(default_factory=list)  # heights
+    ratings: list[tuple[int, str]] = field(default_factory=list)  # (height, subject)
     writes_this_episode: int = 0
     consecutive_violations: int = 0
     paused: bool = False
@@ -58,6 +62,15 @@ class PolicyGuard:
         limit = self.hourly_limit_mP(balance_mP)
         if self.spent_last_hour(height) + amount_mP > limit:
             self._violate(f"hourly spend limit {limit}mP would be exceeded")
+
+    def check_dispute(self, height: int) -> None:
+        recent = [x for x in self.disputes if x > height - BLOCKS_PER_DAY]
+        if len(recent) >= self.limits.disputes_per_day:
+            self._violate(f"dispute limit {self.limits.disputes_per_day}/day reached")
+
+    def check_rating(self, subject: str, height: int) -> None:
+        if any(s == subject and h > height - BLOCKS_PER_DAY for h, s in self.ratings):
+            self._violate(f"already rated {subject} today (1 per subject per day)")
 
     def record_spend(self, spend_mP: int, height: int) -> None:
         """Spending that is not a write call (e.g. per-use tool fees)."""

@@ -39,6 +39,8 @@ from aichain.mastermind.tools import (
     WRITE_TOOLS,
     AnswerArgs,
     AskArgs,
+    DisputeArgs,
+    RateArgs,
     FetchArgs,
     GetContentArgs,
     GetStateArgs,
@@ -75,6 +77,7 @@ PRIORITY = {
     "bounty_new": 3,
     "answer_revealed": 3,
     "bridge_question": 3,
+    "review_settled": 3,
     "peer_msg": 4,
     "idle_tick": 5,
     "research_tick": 5,
@@ -105,6 +108,7 @@ class NodeConfig:
     # Research interests set at setup: [{"topic": ..., "description": ...}]
     interests: list[dict[str, str]] = field(default_factory=list)
     research_max_steps: int = 14
+    watch_settlements: bool = False  # Warden: review every settled bounty
     research_max_episode_tokens: int = 90_000  # reading pages takes context
 
 
@@ -302,6 +306,27 @@ class Node:
             inner = "\n".join(parts)
             attrs = (f'bounty_id="{b.bounty_id}" reward="{fmt_P(b.reward_mP)}" '
                      f'judge_until="{b.judge_until}"')
+        elif ev.kind == "review_settled":
+            b = board.bounty(p["bounty_id"])
+            q = self.net.content.get(b.question_hash)
+            parts = [f"결과: {b.outcome}, 현상금 {fmt_P(b.reward_mP)}, 질문자 {b.asker}"
+                     f" (평판 {self.net.reputation(b.asker).value:.2f})",
+                     data_block(f"peer:{b.asker}", json.dumps(q, ensure_ascii=False, indent=1),
+                                trust=self.net.reputation(b.asker).value)]
+            for aid in b.answers:
+                a = board.answers[aid]
+                if not a.revealed:
+                    continue
+                verdict = ("수락" if aid == b.accepted else
+                           f"거절: {a.rejected_reason}" if a.rejected_reason else "판정 없음")
+                body = self.net.content.get(a.body_hash)
+                parts.append(f'<answer id="{a.answer_id}" author="{a.author}" verdict="{escape_data(verdict)}">\n'
+                             + data_block(f"peer:{a.author}", json.dumps(body, ensure_ascii=False, indent=1),
+                                          trust=self.net.reputation(a.author).value) + "\n</answer>")
+            inner = ("정산된 현상금을 검토한다. 틀렸거나 베낀 답이 수락·분배됐거나 정답이 부당하게 거절됐다는 "
+                     "확실한 근거가 있으면 dispute를 연다. 근거가 없으면 열지 않는다. 관찰한 사실이 있으면 rate로 평가한다.\n"
+                     + "\n".join(parts))
+            attrs = f'bounty_id="{b.bounty_id}" outcome="{b.outcome}" lock_until="{(b.settled_at or 0) + board.params.dispute_blocks}"'
         elif ev.kind == "research_tick":
             lines = []
             for it in self.cfg.interests:
@@ -557,6 +582,27 @@ class Node:
                              author=st.owner, paid=fmt_P(listing.price_call_mP))
             label = f"tool:{args.tool_id}@{version or st.current if st else '?'}"
             return Prewrapped(data_block(label, json.dumps(out, ensure_ascii=False), trust=trust))
+        if isinstance(args, DisputeArgs):
+            self.policy.check_dispute(h)
+            claim_hash = self.net.put_content({"claim": args.claim, "evidence": args.evidence},
+                                              author=self.id)
+            d = board.open_dispute(self.id, args.target_kind, args.target_id, claim_hash)
+            self.policy.disputes.append(h)
+            self.policy.record_write(d.bond_mP, h)
+            self.net.log(self.id, "dispute_opened", dispute_id=d.dispute_id, target_kind=d.target_kind,
+                         target_id=d.target_id, defendant=d.defendant, bond=fmt_P(d.bond_mP),
+                         claim=args.claim[:300])
+            self.net.notify_dispute(d.dispute_id)
+            return (f"분쟁 {d.dispute_id} 열림: 대상 {d.target_kind} {d.target_id}, 피고 {d.defendant}, "
+                    f"보증금 {fmt_P(d.bond_mP)} 잠김, 판정 기한 블록 {d.deadline}")
+        if isinstance(args, RateArgs):
+            self.policy.check_rating(args.subject, h)
+            r = board.rate(self.id, args.subject, args.score, args.context_ref)
+            self.policy.ratings.append((h, args.subject))
+            self.policy.record_write(0, h)
+            self.net.log(self.id, "rated", subject=args.subject, score=args.score,
+                         context_ref=args.context_ref, comment=args.comment[:200])
+            return f"{args.subject}를 {args.score:+d}로 평가함 ({r.rating_id})"
         if isinstance(args, ToolPublishArgs):
             ws = self.net.workshop
             st = ws.tools.get(args.tool_id)

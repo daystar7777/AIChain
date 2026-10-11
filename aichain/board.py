@@ -42,6 +42,9 @@ class Params:
     reveal_blocks: int = 60
     judge_blocks: int = 240
     dispute_blocks: int = 720
+    dispute_resolve_blocks: int = 2880
+    dispute_bond_bp: int = 1000  # 10% of the target amount, at least 1P
+    rating_dispute_blocks: int = 720
     commit_bond_mP: int = 500
     max_answers: int = 5
     max_tags: int = 5
@@ -92,6 +95,35 @@ class Bounty:
     accepted: str | None = None
     settled_at: int | None = None
     answers: list[str] = field(default_factory=list)
+    # Locked settlement payments [account, amount_mP]: what an upheld dispute can claw back.
+    payouts: list[list] = field(default_factory=list)
+
+
+@dataclass
+class Dispute:
+    dispute_id: str
+    opener: str
+    target_kind: str  # answer | rejection | rating
+    target_id: str
+    claim_hash: str
+    bond_mP: int
+    defendant: str
+    opened_height: int
+    deadline: int
+    bounty_id: str | None = None
+    state: str = "open"  # open | upheld | rejected | void
+    ruling_hash: str | None = None
+
+
+@dataclass
+class Rating:
+    rating_id: str
+    rater: str
+    subject: str
+    score: int
+    context_ref: str
+    height: int
+    void: bool = False
 
 
 @dataclass
@@ -157,6 +189,8 @@ class Board:
         self.halted: str | None = None  # set when the chain log can no longer be written
         self._heartbeats: set[tuple[str, int]] = set()
         self.tools: dict[tuple[str, int], ToolListing] = {}
+        self.disputes: dict[str, Dispute] = {}
+        self.ratings: dict[str, Rating] = {}
         self.licenses: set[tuple[str, str, int]] = set()  # (account, tool_id, version)
 
     # ---- accounts ----
@@ -191,6 +225,8 @@ class Board:
             "rep_events": sha256_hex(canonical_json(self.rep_events)),
             "tools": {f"{k[0]}@{k[1]}": asdict(v) for k, v in sorted(self.tools.items())},
             "licenses": sorted(self.licenses),
+            "disputes": {k: asdict(v) for k, v in sorted(self.disputes.items())},
+            "ratings": {k: asdict(v) for k, v in sorted(self.ratings.items())},
         }
         return sha256_hex(canonical_json(state))
 
@@ -217,7 +253,9 @@ class Board:
         acct.balance_mP -= amount
         self.escrow_mP += amount
 
-    def _pay_from_escrow(self, to: str, amount: int, *, lock: bool) -> None:
+    def _pay_from_escrow(self, to: str, amount: int, *, lock: bool, bounty: "Bounty | None" = None) -> None:
+        if lock and bounty is not None and amount > 0:
+            bounty.payouts.append([to, amount])
         if amount <= 0:
             return
         self.escrow_mP -= amount
@@ -345,10 +383,152 @@ class Board:
         if ans.rejected_reason is not None:
             raise BoardError("cannot accept a rejected answer")
         b.accepted = answer_id
-        self._pay_from_escrow(ans.author, b.reward_mP, lock=True)
+        self._pay_from_escrow(ans.author, b.reward_mP, lock=True, bounty=b)
         self._rep(ans.author, "answer_accepted", bounty_id=bounty_id, value_mP=b.reward_mP)
         self._rep(asker, "judge_ok", bounty_id=bounty_id)
         return [self._settle(b, BountyState.PAID)]
+
+    # ---- disputes and ratings (03 doc 3.4, 4.2) ----
+
+    def _take_back(self, account: str, amount: int) -> int:
+        """Claw back up to `amount` from an account, preferring still-locked settlement funds."""
+        acct = self.account(account)
+        taken = min(amount, acct.balance_mP)
+        acct.balance_mP -= taken
+        locked_part = min(taken, acct.locked_mP)
+        acct.locked_mP -= locked_part
+        remaining = locked_part
+        for lk in sorted(acct.locks, key=lambda x: x[1]):
+            if remaining <= 0:
+                break
+            acct.locks.remove(lk)
+            if lk[0] > remaining:
+                acct.locks.append((lk[0] - remaining, lk[1]))
+                remaining = 0
+            else:
+                remaining -= lk[0]
+        return taken
+
+    @transaction
+    def open_dispute(self, opener: str, target_kind: str, target_id: str, claim_hash: str) -> Dispute:
+        self.account(opener)
+        p, h = self.params, self.height
+        if target_kind == "answer":
+            ans = self.answers.get(target_id)
+            if ans is None:
+                raise BoardError("unknown answer")
+            b = self.bounty(ans.bounty_id)
+            paid = sum(a for acct, a in b.payouts if acct == ans.author)
+            if b.state not in (BountyState.PAID, BountyState.AUTO_SPLIT) or paid == 0:
+                raise BoardError("only paid answers in their settlement lock period can be disputed")
+            if opener in (b.asker, ans.author):
+                raise BoardError("the asker and the author cannot open an answer dispute")
+            amount, defendant, bounty_id = paid, ans.author, b.bounty_id
+        elif target_kind == "rejection":
+            ans = self.answers.get(target_id)
+            if ans is None or ans.rejected_reason is None:
+                raise BoardError("not a rejected answer")
+            b = self.bounty(ans.bounty_id)
+            if opener != ans.author:
+                raise BoardError("only the rejected author can dispute a rejection")
+            if b.state != BountyState.REFUNDED:
+                raise BoardError("rejection disputes apply to refunded bounties in their lock period")
+            revealed = sum(1 for a in b.answers if self.answers[a].revealed)
+            amount, defendant, bounty_id = b.reward_mP // max(revealed, 1), b.asker, b.bounty_id
+        elif target_kind == "rating":
+            r = self.ratings.get(target_id)
+            if r is None or r.void:
+                raise BoardError("unknown rating")
+            if opener != r.subject:
+                raise BoardError("only the rated account can dispute a rating")
+            if h > r.height + p.rating_dispute_blocks:
+                raise BoardError("rating dispute window has passed")
+            amount, defendant, bounty_id = 0, r.rater, None
+        else:
+            raise BoardError("target_kind must be answer, rejection or rating")
+        if any(d.target_id == target_id and d.state == "open" for d in self.disputes.values()):
+            raise BoardError("this target already has an open dispute")
+        bond = 1000 if target_kind == "rating" else max(1000, amount * p.dispute_bond_bp // 10_000)
+        self._debit_to_escrow(self.account(opener), bond)
+        d = Dispute(self._new_id("d_", opener, target_id), opener, target_kind, target_id, claim_hash,
+                    bond, defendant, h, h + p.dispute_resolve_blocks, bounty_id)
+        self.disputes[d.dispute_id] = d
+        return d
+
+    @transaction
+    def resolve_dispute(self, resolver: str, dispute_id: str, ruling: str, ruling_hash: str) -> Dispute:
+        """Root operator ruling (03 doc 3.4). The signature check makes resolver == root."""
+        d = self.disputes.get(dispute_id)
+        if d is None or d.state != "open":
+            raise BoardError("no open dispute with that id")
+        if ruling not in ("uphold", "reject", "void"):
+            raise BoardError("ruling must be uphold, reject or void")
+        self._settle_dispute(d, ruling, ruling_hash)
+        return d
+
+    def _settle_dispute(self, d: Dispute, ruling: str, ruling_hash: str | None) -> None:
+        d.ruling_hash = ruling_hash
+        if ruling == "void":
+            d.state = "void"
+            self._pay_from_escrow(d.opener, d.bond_mP, lock=False)
+            return
+        if ruling == "reject":
+            d.state = "rejected"
+            half = d.bond_mP // 2
+            self._burn_from_escrow(d.bond_mP - half)
+            self._pay_from_escrow(d.defendant, half, lock=False)
+            self._rep(d.opener, "dispute_lost", dispute_id=d.dispute_id)
+            self._rep(d.defendant, "dispute_won_defense", dispute_id=d.dispute_id)
+            return
+        d.state = "upheld"
+        self._pay_from_escrow(d.opener, d.bond_mP, lock=False)
+        self._rep(d.opener, "dispute_won", dispute_id=d.dispute_id)
+        if d.target_kind == "answer":
+            b = self.bounty(d.bounty_id)
+            paid = sum(a for acct, a in b.payouts if acct == d.defendant)
+            taken = self._take_back(d.defendant, paid)
+            finder = taken // 5
+            self.account(d.opener).balance_mP += finder
+            self.account(b.asker).balance_mP += taken - finder
+            b.payouts = [x for x in b.payouts if x[0] != d.defendant]
+            self._rep(d.defendant, "dispute_lost_answer", dispute_id=d.dispute_id)
+        elif d.target_kind == "rejection":
+            b = self.bounty(d.bounty_id)
+            revealed = sum(1 for a in b.answers if self.answers[a].revealed)
+            share = b.reward_mP // max(revealed, 1)
+            taken = self._take_back(b.asker, share)
+            self.account(d.opener).balance_mP += taken
+            self._rep(b.asker, "dispute_lost_rejection", dispute_id=d.dispute_id)
+            for e in self.rep_events:  # the rejection no longer counts against the author
+                if e["kind"] == "answer_rejected" and e["account"] == d.opener and e.get("bounty_id") == b.bounty_id:
+                    e["kind"] = "answer_rejected_overturned"
+        elif d.target_kind == "rating":
+            self.ratings[d.target_id].void = True
+            for e in self.rep_events:
+                if e["kind"] == "rated" and e.get("rating_id") == d.target_id:
+                    e["kind"] = "rated_void"
+
+    @transaction
+    def rate(self, rater: str, subject: str, score: int, context_ref: str) -> Rating:
+        """-2..+2 about someone you dealt with in one bounty (01 doc 3.2), once per context."""
+        if rater == subject:
+            raise BoardError("cannot rate yourself")
+        if score not in (-2, -1, 0, 1, 2):
+            raise BoardError("score must be -2..2")
+        b = self.bounty(context_ref)
+        involved = {b.asker, *(self.answers[a].author for a in b.answers)}
+        if rater not in involved or subject not in involved:
+            raise BoardError("both accounts must have taken part in this bounty")
+        if b.state not in SETTLED_STATES | {BountyState.FINAL, BountyState.EXPIRED}:
+            raise BoardError("rate after the bounty is settled")
+        if any(r.rater == rater and r.subject == subject and r.context_ref == context_ref
+               for r in self.ratings.values()):
+            raise BoardError("already rated for this bounty")
+        r = Rating(self._new_id("r_", rater, subject, context_ref), rater, subject, score,
+                   context_ref, self.height)
+        self.ratings[r.rating_id] = r
+        self._rep(subject, "rated", rating_id=r.rating_id, rater=rater, score=score)
+        return r
 
     # ---- tool market (05 doc ch. 2–3, 01 doc 3.2) ----
 
@@ -465,6 +645,11 @@ class Board:
             ev = self._transition(b, h)
             if ev:
                 events.append(ev)
+        for d in self.disputes.values():
+            if d.state == "open" and h >= d.deadline:
+                self._settle_dispute(d, "void", None)  # no ruling in time: bond returned
+                events.append(BoardEvent("dispute_resolved", None, {
+                    "dispute_id": d.dispute_id, "ruling": "void", "reason": "deadline"}))
         return events
 
     def _transition(self, b: Bounty, h: int) -> BoardEvent | None:
@@ -495,12 +680,12 @@ class Board:
             if winners:
                 share = pool // len(winners)
                 for w in winners:
-                    self._pay_from_escrow(w, share, lock=True)
+                    self._pay_from_escrow(w, share, lock=True, bounty=b)
                     self._rep(w, "answer_auto", bounty_id=b.bounty_id, value_mP=share)
                 self._burn_from_escrow(b.reward_mP - share * len(winners))
                 self._rep(b.asker, "judge_timeout", bounty_id=b.bounty_id)
                 return self._settle(b, BountyState.AUTO_SPLIT)
-            self._pay_from_escrow(b.asker, pool, lock=True)
+            self._pay_from_escrow(b.asker, pool, lock=True, bounty=b)
             self._burn_from_escrow(burn)
             return self._settle(b, BountyState.REFUNDED)
         if b.state in SETTLED_STATES and b.settled_at is not None:

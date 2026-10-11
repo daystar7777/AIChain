@@ -127,8 +127,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"chain replayed: {net.chain_stats}", file=sys.stderr)
         if journal:
             net.log("core", "chain_replayed", **(net.chain_stats or {}))
+        admin_path = ROOT / "data" / "admin_token"
+        if not admin_path.exists():
+            import os
+            import secrets as _secrets
+
+            fd = os.open(admin_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write("adm_" + _secrets.token_urlsafe(32))
+        admin_token = admin_path.read_text().strip()
         try:
-            uvicorn.run(create_app(runtime, tokens), host=args.host, port=args.port, log_level="info")
+            uvicorn.run(create_app(runtime, tokens, admin_token=admin_token), host=args.host,
+                        port=args.port, log_level="info")
         finally:
             if journal:
                 journal.close()
