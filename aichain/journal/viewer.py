@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import ipaddress
 import json
+import socket
 import sqlite3
 import sys
 from pathlib import Path
@@ -124,23 +125,42 @@ def create_app(db_path: Path, poll_seconds: float = 0.5, keepalive_seconds: floa
     return app
 
 
+def _bind(host: str, port: int) -> socket.socket:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    sock.listen(2048)
+    sock.set_inheritable(True)
+    return sock
+
+
 def main(argv: list[str] | None = None) -> int:
     import uvicorn
 
     ap = argparse.ArgumentParser(description="AIChain journal viewer (read-only)")
     ap.add_argument("--db", type=Path, default=DEFAULT_DB)
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--host", action="append", default=None,
+                    help="address to bind; repeat for several (default 127.0.0.1)")
     ap.add_argument("--port", type=int, default=8790)
-    ap.add_argument("--allow-public", action="store_true")
+    ap.add_argument("--allow-public", action="store_true",
+                    help="allow non-loopback addresses (e.g. the Tailscale IP)")
     args = ap.parse_args(argv)
-    try:
-        loopback = args.host == "localhost" or ipaddress.ip_address(args.host).is_loopback
-    except ValueError:
-        loopback = False
-    if not loopback and not args.allow_public:
-        print(f"refusing to bind {args.host}: use 127.0.0.1 or pass --allow-public", file=sys.stderr)
-        return 2
-    uvicorn.run(create_app(args.db), host=args.host, port=args.port, log_level="info")
+    hosts = args.host or ["127.0.0.1"]
+    for host in hosts:
+        try:
+            loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = False
+        if host in ("0.0.0.0", "::"):
+            print("refusing to bind every interface; name the addresses explicitly", file=sys.stderr)
+            return 2
+        if not loopback and not args.allow_public:
+            print(f"refusing to bind {host}: use 127.0.0.1 or pass --allow-public", file=sys.stderr)
+            return 2
+    sockets = [_bind(h, args.port) for h in hosts]
+    config = uvicorn.Config(create_app(args.db), log_level="info")
+    uvicorn.Server(config).run(sockets=sockets)
     return 0
 
 
