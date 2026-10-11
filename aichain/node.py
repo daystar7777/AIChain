@@ -35,6 +35,7 @@ from aichain.mastermind.policy import PolicyGuard, PolicyViolation
 from aichain.mastermind.tools import (
     TOOLS,
     WEB_TOOLS,
+    WORKSHOP_TOOLS,
     WRITE_TOOLS,
     AnswerArgs,
     AskArgs,
@@ -46,9 +47,14 @@ from aichain.mastermind.tools import (
     RecallArgs,
     RememberArgs,
     SearchArgs,
+    ToolActivateArgs,
+    ToolDevArgs,
+    ToolListArgs,
+    ToolRunArgs,
     tool_specs,
 )
 from aichain.memory import Memory
+from aichain.workshop.registry import WorkshopError
 
 if TYPE_CHECKING:
     from aichain.sim.network import Network
@@ -228,6 +234,7 @@ class Node:
             f"{', '.join(self.tool_names())}. 고정 코어에 적힌 나머지 도구는 아직 없다.\n\n"
             "### 내 지식 노트\n"
             f"{self._notes_index()}\n\n"
+            + (self._workshop_section() if self.net.workshop is not None else "") +
             "## 진행 방법\n"
             "- 잔액, 예산, 열린 현상금은 이미 위에 있다. 이 에피소드 안에서 값이 바뀌었을 때만 "
             "get_state로 다시 조회한다.\n"
@@ -449,6 +456,42 @@ class Node:
             header = f"title: {page.get('title', '')}\ncontent_hash: {content_hash}\n\n"
             return Prewrapped(data_block(f"web:{args.url}", header + page["text"], trust=WEB_TRUST,
                                          fetched=page.get("fetched_at", "")))
+        if isinstance(args, ToolDevArgs):
+            ws = self.net.workshop
+            try:
+                tv = ws.define(self.id, args.manifest, args.code, args.tests, args.reason)
+            except WorkshopError as e:
+                self.net.log(self.id, "tool_defined", ok=False, name=args.manifest.name, error=str(e)[:500])
+                raise BoardError(f"도구 정의 실패: {e}") from e
+            self.memory.remember(h, "episode", "self", 1.0,
+                                 f"도구 {tv.tool_id} v{tv.version} 정의 (테스트 {tv.test_status}): {args.reason}",
+                                 ["tool"], [tv.code_hash])
+            self.net.log(self.id, "tool_defined", ok=True, tool_id=tv.tool_id, version=tv.version,
+                         test_status=tv.test_status, code_hash=tv.code_hash, reason=args.reason)
+            report = json.dumps(tv.test_report, ensure_ascii=False)[:2000]
+            return Prewrapped(data_block("workshop", f"{tv.tool_id} v{tv.version} 기록됨. "
+                                         f"테스트: {tv.test_status}\n{report}"))
+        if isinstance(args, ToolListArgs):
+            try:
+                return Prewrapped(data_block("workshop", self.net.workshop.describe(
+                    self.id, args.tool_id, args.version)))
+            except WorkshopError as e:
+                raise BoardError(str(e)) from e
+        if isinstance(args, ToolActivateArgs):
+            try:
+                st = self.net.workshop.activate(self.id, args.tool_id, args.version, args.mode)
+            except WorkshopError as e:
+                self.net.log(self.id, "tool_activated", ok=False, tool_id=args.tool_id,
+                             version=args.version, error=str(e))
+                raise BoardError(str(e)) from e
+            self.net.log(self.id, "tool_activated", ok=True, tool_id=st.tool_id, current=st.current)
+            return f"{st.tool_id} 활성화: current=v{st.current}"
+        if isinstance(args, ToolRunArgs):
+            try:
+                out = self.net.workshop.run(self.id, args.tool_id, args.input)
+            except WorkshopError as e:
+                raise BoardError(str(e)) from e
+            return Prewrapped(data_block(f"tool:{args.tool_id}", json.dumps(out, ensure_ascii=False)))
         if isinstance(args, NoteArgs):
             hashes = [self._require_fetched(f.source_url) for f in args.facts]
             prev = self.memory.latest_note(args.topic)
@@ -508,11 +551,30 @@ class Node:
         raise BoardError(f"unhandled tool {name}")
 
     def tool_names(self) -> list[str]:
-        names = [n for n in TOOLS if n not in WEB_TOOLS]
+        names = [n for n in TOOLS if n not in WEB_TOOLS | WORKSHOP_TOOLS and n != "done"]
+        active = self.bucket.state == BudgetState.ACTIVE
         # Web tools exist only with a web gateway and only while the budget is ACTIVE (05 doc 1.3).
-        if self.net.web is not None and self.bucket.state == BudgetState.ACTIVE:
-            names = names[:-1] + sorted(WEB_TOOLS) + ["done"]
-        return names
+        if self.net.web is not None and active:
+            names += sorted(WEB_TOOLS)
+        if self.net.workshop is not None and active:
+            names += ["tool_dev", "tool_list", "tool_activate"]
+            if self.net.workshop.can_execute:
+                names.append("tool_run")
+        return names + ["done"]
+
+    def _workshop_section(self) -> str:
+        execution = ("켜져 있다" if self.net.workshop.can_execute
+                     else "꺼져 있다 (정의·정적 검사·버전 관리만 된다. 실행은 운영자가 격리 환경을 켜야 한다)")
+        return (
+            "## 도구 공방\n"
+            "- 같은 계산·변환·검증을 반복하거나, 손으로 하면 틀리기 쉬운 정확한 처리가 필요하면 "
+            "tool_dev로 작은 Python 도구를 만들 수 있다. 일회성 작업이면 만들지 않는다.\n"
+            "- 도구는 네트워크·파일·프로세스에 접근할 수 없고, 입력 dict를 받아 출력 dict를 돌려준다. "
+            "테스트를 3개 이상 붙인다.\n"
+            "- 고칠 때는 같은 이름으로 새 버전을 정의한다. 이전 버전은 남고, 실패한 버전은 current를 바꾸지 않는다.\n"
+            f"- 실행: {execution}\n"
+            f"- 내 도구: {self.net.workshop.describe(self.id).replace(chr(10), ' / ')}\n\n"
+        )
 
     def _require_fetched(self, url: str) -> str:
         if url not in self._web_seen:

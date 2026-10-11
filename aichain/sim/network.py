@@ -15,6 +15,7 @@ from aichain.content import ContentStore
 from aichain.gateways.llm.base import LLMGateway
 from aichain.gateways.web import SearchGateway
 from aichain.memory import KnowledgeStore
+from aichain.workshop.registry import Workshop
 from aichain.node import EpisodeResult, Node, NodeConfig
 
 SECONDS_PER_BLOCK = 5
@@ -24,8 +25,10 @@ class Network:
     def __init__(self, gateway: LLMGateway, params: Params | None = None,
                  trace: TextIO | None = None, echo: bool = False,
                  web: SearchGateway | None = None, knowledge: KnowledgeStore | None = None,
-                 research_interval_blocks: int | None = None) -> None:
+                 research_interval_blocks: int | None = None,
+                 workshop: Workshop | None = None) -> None:
         self.gateway = gateway
+        self.workshop = workshop
         self.web = web
         self.knowledge = knowledge
         # When set, idle nodes with interests get a research_tick every this many blocks.

@@ -11,6 +11,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from aichain.gateways.llm.base import ToolSpec
+from aichain.workshop.manifest import ToolTest, ToolManifest
 
 
 class GetStateArgs(BaseModel):
@@ -102,6 +103,30 @@ class JudgeArgs(BaseModel):
         default_factory=list, description="정답 조건을 충족하지 못한 답변만. 수락과 함께 쓸 필요 없음.")
 
 
+class ToolDevArgs(BaseModel):
+    manifest: ToolManifest
+    code: str = Field(max_length=200_000, description="Python 코드. 최상위에 def run(input, ctx) -> dict")
+    tests: list[ToolTest] = Field(min_length=3, max_length=20)
+    reason: str = Field(max_length=1000, description="이 도구가 왜 필요한지")
+
+
+class ToolListArgs(BaseModel):
+    tool_id: str | None = Field(default=None, description="비우면 내 도구 목록, 지정하면 상세(코드·테스트 결과)")
+    version: int | None = None
+
+
+class ToolActivateArgs(BaseModel):
+    tool_id: str
+    version: int
+    mode: Literal["run", "update"] = Field(
+        description="run: 첫 활성화·재시작·current로 롤백. update: 다른 버전으로 전환")
+
+
+class ToolRunArgs(BaseModel):
+    tool_id: str
+    input: dict = Field(default_factory=dict)
+
+
 class DoneArgs(BaseModel):
     summary: str = Field(max_length=1000, description="이번 에피소드에서 한 일과 이유, 한두 문장")
 
@@ -119,10 +144,16 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "search": (SearchArgs, "헤드리스 브라우저로 웹을 검색한다. 결과(제목, URL, 요약)는 <data>다."),
     "fetch": (FetchArgs, "웹 페이지를 열어 본문 텍스트를 읽는다. 결과는 <data source=\"web:URL\">다."),
     "note": (NoteArgs, "관심사 주제의 지식 노트를 쓰거나 갱신한다. 같은 주제의 이전 노트는 새 노트로 대체되고 기록은 남는다."),
+    "tool_dev": (ToolDevArgs, "새 도구(또는 기존 도구의 새 버전)를 정의한다. 정적 검사와 테스트를 거쳐 "
+                              "불변 버전으로 기록된다. 실패하면 이유와 고칠 방법이 돌아온다."),
+    "tool_list": (ToolListArgs, "내 도구 목록, 또는 한 도구의 코드·테스트 결과를 본다."),
+    "tool_activate": (ToolActivateArgs, "테스트를 통과한 버전을 활성화한다. 실패한 업데이트는 current를 바꾸지 않는다."),
+    "tool_run": (ToolRunArgs, "활성화된 내 도구를 실행한다. 결과는 <data source=\"tool:...\">다."),
     "done": (DoneArgs, "에피소드를 끝낸다."),
 }
 
 WEB_TOOLS = {"search", "fetch", "note"}
+WORKSHOP_TOOLS = {"tool_dev", "tool_list", "tool_activate", "tool_run"}
 
 WRITE_TOOLS = {"ask", "answer", "judge"}
 

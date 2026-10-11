@@ -12,6 +12,7 @@ from aichain.gateways.llm.opencode_go import DEFAULT_MODEL, OpenCodeGoAdapter
 from aichain.gateways.llm.scripted import Brain, ScriptedAdapter
 from aichain.gateways.web import SearchGateway
 from aichain.memory import KnowledgeStore
+from aichain.workshop.registry import Workshop
 from aichain.node import NodeConfig
 from aichain.sim.brains import persona_brain
 from aichain.sim.network import Network
@@ -82,6 +83,7 @@ def build_network(
     research_interval_blocks: int | None = None,
     daily_calls_per_node: int | None = None,
     daily_calls_total: int | None = None,
+    workshop: Workshop | None = None,
 ) -> Network:
     adapters: dict[str, ProviderAdapter] = {}
     if provider == "scripted":
@@ -99,7 +101,8 @@ def build_network(
                                                  daily_calls_per_node=daily_calls_per_node,
                                                  daily_calls_total=daily_calls_total))
     net = Network(gateway, params or SHORT_PARAMS, trace=trace, echo=echo, web=web,
-                  knowledge=knowledge, research_interval_blocks=research_interval_blocks)
+                  knowledge=knowledge, research_interval_blocks=research_interval_blocks,
+                  workshop=workshop)
     for cfg in default_nodes(provider, model, nomad_model, interests):
         net.add_node(cfg)
     return net

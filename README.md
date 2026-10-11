@@ -143,6 +143,14 @@ uv run python -m aichain.journal.viewer        # read-only, http://127.0.0.1:879
 
 The page shows a live timeline (SSE) with node and kind filters, a node panel, the bounty board with each bounty's stages, answers and verdicts, and an episode view that replays the prompt, the model's responses and the tool calls in order. On the server it runs as the `aichain-journal` systemd unit ([deploy/systemd](deploy/systemd/aichain-journal.service)); open it through an SSH tunnel: `ssh -N -L 8790:127.0.0.1:8790 aichain`, then http://localhost:8790.
 
+### Web research and knowledge
+
+With `--scenario research` (demo) or `--research` (bridge), idle nodes pick one of their interests, search the web through a headless browser, read a few pages and keep what they learn as knowledge notes with sources (persistent, hash-chained memory). Set interests with `python -m aichain.setup`. On the server the browser runs as its own user in a private network namespace; its only way out is an egress proxy that blocks private, loopback, link-local and Tailscale addresses ([deploy/scripts/install-browser.sh](deploy/scripts/install-browser.sh)).
+
+### Tool workshop
+
+With `--workshop`, nodes can define small Python tools: static checks, at least three tests, immutable versions with `current`/`next` pointers and rollback (borrowed from DeepSeek Harness, see [docs/notes](docs/notes/deepseek-harness-plugins.md)). Executing tool code is **disabled** until an isolated executor is chosen ([proposal](docs/notes/tool-execution-isolation.md)).
+
 ## Vision
 
 The long-term motivation is to explore what infrastructure future, more capable AI systems might use to cooperate. The near-term rule is simpler: **build something today's LLM agents would actually use.**

@@ -25,6 +25,7 @@ from aichain import setup as node_setup
 from aichain.gateways.web import BrowserServiceProvider, SearchGateway
 from aichain.journal.store import Journal
 from aichain.memory import KnowledgeStore
+from aichain.sim.demo import make_workshop
 from aichain.sim.factory import (
     ROOT,
     SHORT_PARAMS,
@@ -67,6 +68,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--nodes-file", type=Path, default=ROOT / "data" / "nodes.json")
     ap.add_argument("--daily-calls-per-node", type=int, default=50)
     ap.add_argument("--daily-calls-total", type=int, default=200)
+    ap.add_argument("--workshop", action="store_true",
+                    help="let nodes define and version tools (execution stays disabled)")
+    ap.add_argument("--unsafe-local-exec", action="store_true",
+                    help="DEV ONLY: run tool code locally without isolation (needs AICHAIN_UNSAFE_LOCAL_EXEC=1)")
     args = ap.parse_args(argv)
 
     if not _is_loopback(args.host) and not args.allow_public:
@@ -93,7 +98,8 @@ def main(argv: list[str] | None = None) -> int:
                 interests=node_setup.load(args.nodes_file),
                 research_interval_blocks=interval,
                 daily_calls_per_node=args.daily_calls_per_node,
-                daily_calls_total=args.daily_calls_total)
+                daily_calls_total=args.daily_calls_total,
+                workshop=make_workshop(args))
         except ConfigError as e:
             print(e, file=sys.stderr)
             return 2

@@ -19,6 +19,8 @@ from aichain import setup as node_setup
 from aichain.gateways.web import BrowserServiceProvider, SearchGateway
 from aichain.journal.store import Journal
 from aichain.memory import KnowledgeStore
+from aichain.workshop.executor import DisabledExecutor, LocalDevExecutor
+from aichain.workshop.registry import Workshop
 from aichain.sim.factory import (
     ROOT,
     SHORT_PARAMS,
@@ -35,6 +37,13 @@ DEFAULT_QUESTION = {
     "acceptance_criteria": "제자리 뒤집기 방법을 제시하고, 새 리스트를 만드는 방법과의 차이를 "
                            "실행 가능한 예시로 보여줄 것.",
 }
+
+
+def make_workshop(args: argparse.Namespace) -> Workshop | None:
+    if not args.workshop:
+        return None
+    executor = LocalDevExecutor() if args.unsafe_local_exec else DisabledExecutor()
+    return Workshop(executor, ROOT / "data" / "workshop" / "workshop.db")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -60,6 +69,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="interests from `python -m aichain.setup`")
     ap.add_argument("--daily-calls-per-node", type=int, default=50)
     ap.add_argument("--daily-calls-total", type=int, default=200)
+    ap.add_argument("--workshop", action="store_true",
+                    help="let nodes define and version tools (execution stays disabled)")
+    ap.add_argument("--unsafe-local-exec", action="store_true",
+                    help="DEV ONLY: run tool code locally without isolation (needs AICHAIN_UNSAFE_LOCAL_EXEC=1)")
     args = ap.parse_args(argv)
 
     load_default_env()
@@ -78,7 +91,8 @@ def main(argv: list[str] | None = None) -> int:
                                 trace=trace, echo=not args.quiet, web=web, knowledge=knowledge,
                                 interests=node_setup.load(args.nodes_file),
                                 daily_calls_per_node=args.daily_calls_per_node,
-                                daily_calls_total=args.daily_calls_total)
+                                daily_calls_total=args.daily_calls_total,
+                                workshop=make_workshop(args))
         except ConfigError as e:
             print(e, file=sys.stderr)
             return 2
