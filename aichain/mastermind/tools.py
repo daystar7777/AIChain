@@ -224,6 +224,10 @@ class TransferArgs(BaseModel):
     memo: str = Field(max_length=500, description="왜 보내는지 (관리인이 승인할 때 본다)")
 
 
+class NotifyManagerArgs(BaseModel):
+    text: str = Field(max_length=2000, description="관리인(사람)에게 보낼 메시지")
+
+
 class SavingsArgs(BaseModel):
     action: Literal["list", "deposit", "withdraw"] = "list"
     amount_P: float | None = Field(default=None, ge=1)
@@ -318,6 +322,7 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "loans": (LoansArgs, "대출 시장: list(열린 요청과 내 대출), fund(요청에 빌려준다), repay(조기 상환), cancel(내 요청 취소)."),
     "transfer": (TransferArgs, "다른 계정으로 포인트를 보낸다. 노드 자산이 밖으로 나가므로 관리인(사람) 승인이 필요하다. "
                                "승인이나 72시간 무응답 뒤에 Core가 집행한다."),
+    "notify_manager": (NotifyManagerArgs, "노드 관리인(사람)에게 메시지를 보낸다(텔레그램 등). 보고·질문용. 승인은 따로 요청된다."),
     "savings": (SavingsArgs, "정기 예금: deposit(금액·기간을 잠금), withdraw(중도 해지: 원금만, 이자 몰수), list. "
                              "이자는 매 에포크 블록 보상의 10%를 예치액 비율로 나눠 받고, 만기에 원금과 함께 자동 지급된다."),
     "offer_withdraw": (OfferWithdrawArgs, "내 판매 등록을 내린다(이미 판 것은 유지)."),

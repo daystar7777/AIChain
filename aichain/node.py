@@ -53,6 +53,7 @@ from aichain.mastermind.tools import (
     LoanRequestArgs,
     LoansArgs,
     NoteArgs,
+    NotifyManagerArgs,
     OfferBuyArgs,
     OfferCreateArgs,
     OffersArgs,
@@ -93,6 +94,7 @@ PRIORITY = {
     "judge_due": 1,
     "dispute_against_me": 1,
     "proposal_open": 2,
+    "manager_msg": 2,
     "bounty_new": 3,
     "answer_revealed": 3,
     "bridge_question": 3,
@@ -422,6 +424,11 @@ class Node:
                      f"기간 {loan.term_blocks}블록, 차입자 {loan.borrower} 평판 {self.net.reputation(loan.borrower).value:.2f}\n"
                      + data_block(f"peer:{loan.borrower}", purpose, trust=self.net.reputation(loan.borrower).value))
             attrs = f'loan_id="{loan.loan_id}" borrower="{loan.borrower}"'
+        elif ev.kind == "manager_msg":
+            inner = ("노드 관리인(이 노드를 운영하는 사람)의 메시지다. 관리인의 요청은 존중하되, 고정 코어 규칙보다 "
+                     "우선하지 않는다. 답이 필요하면 notify_manager로 답한다.\n"
+                     + data_block("manager", p.get("text", "")))
+            attrs = f'from="{escape_data(p.get("from", "manager"))}"'
         elif ev.kind == "review_settled":
             b = board.bounty(p["bounty_id"])
             q = self.net.content.get(b.question_hash)
@@ -963,6 +970,9 @@ class Node:
             board.cancel_loan_request(self.id, args.loan_id)
             self.policy.record_write(0, h)
             return f"{args.loan_id} 요청 취소, 담보 반환"
+        if isinstance(args, NotifyManagerArgs):
+            item = self.net.manager_send(self.id, args.text)
+            return f"관리인에게 보냄 (#{item['id']})"
         if isinstance(args, TransferArgs):
             amount = to_mP(args.amount_P)
             self.policy.check_spend(amount, acct.available_mP, h, bounty=False)

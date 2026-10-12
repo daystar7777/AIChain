@@ -283,6 +283,27 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
             return asdict(a)
         return runtime.call(fn)
 
+    class ManagerMsgIn(BaseModel):
+        text: str = Field(min_length=1, max_length=4000)
+
+    @app.post("/admin/v1/nodes/{node_id}/message", dependencies=[Depends(operator)])
+    def message_node(node_id: str, body: ManagerMsgIn) -> dict[str, Any]:
+        def fn(net: Any) -> dict[str, Any]:
+            try:
+                net.manager_receive(node_id, body.text)
+            except KeyError as e:
+                raise HTTPException(404, str(e)) from e
+            return {"queued": True}
+        return runtime.call(fn)
+
+    @app.get("/admin/v1/status", dependencies=[Depends(operator)])
+    def admin_status() -> dict[str, Any]:
+        return runtime.snapshot()
+
+    @app.get("/admin/v1/outbox", dependencies=[Depends(operator)])
+    def outbox(after: int = 0) -> list[dict[str, Any]]:
+        return runtime.call(lambda net: [m for m in net.manager_outbox if m["id"] > after])
+
     @app.get("/bridge/v1/network")
     def network(client: Annotated[Client, Depends(client_of)]) -> dict[str, Any]:
         return runtime.snapshot()

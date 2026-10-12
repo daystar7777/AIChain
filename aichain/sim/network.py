@@ -35,6 +35,7 @@ class Network:
         self.gateway = gateway
         self.chain = chain
         self.approvals = None  # ApprovalBook: outflows wait for the human manager
+        self.manager_outbox: list[dict[str, Any]] = []  # node -> manager messages (Telegram picks them up)
         self.workshop = workshop
         self.web = web
         self.knowledge = knowledge
@@ -354,6 +355,20 @@ class Network:
                                  f"잔액 {self.board.account(node.id).balance_mP / 1000:g}P",
                                  data={"rep": self.reputation(node.id).value,
                                        "balance": self.board.account(node.id).balance_mP})
+
+    def manager_send(self, node_id: str, text: str) -> dict[str, Any]:
+        item = {"id": len(self.manager_outbox) + 1, "node": node_id, "text": text[:2000],
+                "height": self.board.height}
+        self.manager_outbox.append(item)
+        self.log(node_id, "manager_message", direction="to_manager", text=text[:500])
+        return item
+
+    def manager_receive(self, node_id: str, text: str, sender: str = "manager") -> None:
+        node = self.nodes.get(node_id)
+        if node is None:
+            raise KeyError(f"unknown node {node_id}")
+        node.enqueue("manager_msg", {"text": text[:4000], "from": sender})
+        self.log(node_id, "manager_message", direction="from_manager", text=text[:500])
 
     def run_approvals(self) -> None:
         """Execute approved outflows and those whose manager did not answer before the timeout."""

@@ -1,0 +1,21 @@
+# Telegram bridge for the node manager. Needs TELEGRAM_BOT_TOKEN (and TELEGRAM_MANAGER_CHAT_ID)
+# in /opt/aichain/.env. Enable once the token is in place:
+#   systemctl enable --now aichain-telegram
+[Unit]
+Description=AIChain Telegram bridge (node manager)
+After=aichain-bridge.service
+Wants=aichain-bridge.service
+
+[Service]
+WorkingDirectory=/opt/aichain
+ExecStart=/opt/aichain/.venv/bin/python -m aichain.telegram_bridge
+Restart=on-failure
+RestartSec=15
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/aichain/data
+
+[Install]
+WantedBy=multi-user.target
