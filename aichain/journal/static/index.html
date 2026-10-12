@@ -156,6 +156,8 @@ const KIND = {
   persona_edit: ["성향 수정", "warn"], persona_rollback: ["성향 롤백", "bad"],
   tool_request_created: ["도구 구매 요청", "warn"], tool_submission_verified: ["도구 제출 검증", ""],
   library_installed: ["표준 도구 설치", "ok"], offer_created: ["정보 판매 등록", "warn"],
+  approval_requested: ["관리인 승인 요청", "warn"], approval_executed: ["승인 건 집행", "ok"],
+  approval_denied: ["관리인 거부", "bad"], approval_decided: ["관리인 결정", ""], transferred: ["송금", ""],
   savings_deposit: ["예금", ""], deposit_matured: ["예금 만기", "ok"],
   loan_requested: ["대출 요청", "warn"], loan_funded: ["대출 실행", "ok"], loan_settled: ["대출 만기", "warn"],
   purchase_delivered: ["정보 거래", "ok"], subscription_delivered: ["구독 전달", "ok"], subscription_period: ["구독 정산", ""], purchase_refunded: ["구매 환불", "warn"],
@@ -224,6 +226,10 @@ function describe(e) {
     case "tool_submission_verified": return `${esc(d.tool_id)} v${d.version} → <b>${d.passed ? "합격" : "불합격"}</b> (${esc(d.request_id)} ${esc(d.state)})`;
     case "subscription_delivered": return `${esc(d.seller)} → ${esc(d.subscriber)} '${esc(d.topic)}' (암호화)`;
     case "subscription_period": return `${esc(d.sub_id)} ${esc(d.state)} · 결제 ${d.paid} · 환불 ${d.refunded}`;
+    case "approval_requested": return `${esc(d.tool)} ${esc(d.amount)} — ${esc(short(d.reason, 120))}`;
+    case "approval_executed": return `${esc(d.approval_id)} ${esc(d.tool)} [${esc(d.by)}] ${d.ok ? "집행" : "실패"}`;
+    case "approval_denied": return `${esc(d.approval_id)} ${esc(d.note)}`;
+    case "transferred": return `→ ${esc(d.to)} ${esc(d.amount)} — ${esc(short(d.memo, 100))}`;
     case "savings_deposit": return `${esc(d.amount)} · 만기 #${d.unlock}`;
     case "deposit_matured": return `${esc(d.owner)} 이자 ${(d.earned_mP / 1000).toFixed(1)}P`;
     case "loan_requested": return `원금 ${esc(d.principal)} · 이자 ${esc(d.interest)} · 담보 ${esc(d.collateral)} · ${d.term_blocks}블록`;

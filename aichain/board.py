@@ -1082,6 +1082,18 @@ class Board:
             self._rep(loan.borrower, "loan_default", loan_id=loan.loan_id, owed_mP=owed,
                       recovered_mP=loan.collateral_mP)
 
+    @transaction
+    def transfer(self, sender: str, to: str, amount_mP: int, memo_hash: str) -> None:
+        """Direct payment (01 doc 3.2). Nodes need their manager's approval first (Core-side)."""
+        if to == sender:
+            raise BoardError("cannot transfer to yourself")
+        if to not in self.accounts or to in ("root", "lib"):
+            raise BoardError(f"unknown or system account {to}")
+        if amount_mP <= 0:
+            raise BoardError("amount must be positive")
+        self._transfer(sender, to, amount_mP)
+        self._rep(to, "transfer_in", sender=sender, value_mP=amount_mP)
+
     # ---- savings ----
 
     @transaction

@@ -45,7 +45,7 @@ SENDER_FIELD = {"open_account": None, "create_bounty": "asker", "commit_answer":
                 "confirm_delivery": "buyer", "subscribe": "subscriber", "sub_deliver": "seller",
                 "cancel_subscription": "subscriber", "create_loan_request": "borrower",
                 "cancel_loan_request": "borrower", "fund_loan": "lender", "repay_loan": "borrower",
-                "deposit_savings": "owner", "withdraw_savings": "owner"}
+                "deposit_savings": "owner", "withdraw_savings": "owner", "transfer": "sender"}
 
 
 class ReplayMismatch(Exception):

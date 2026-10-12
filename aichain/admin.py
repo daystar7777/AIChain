@@ -6,6 +6,8 @@
     python -m aichain.admin proposals [--all]
     python -m aichain.admin vote <proposal_id> yes|no|abstain --reason "why"   (operator seat)
     python -m aichain.admin veto <proposal_id> --reason "why"                   (root, timelock only)
+    python -m aichain.admin approvals [--all]                      (outflows waiting for the manager)
+    python -m aichain.admin approve <approval_id> [--note "..."] / deny <approval_id> [--note "..."]
     python -m aichain.admin persona <node> [--version N]          (history, or show one version)
     python -m aichain.admin rollback <node> <version> --note "why"
 
@@ -46,6 +48,12 @@ def main(argv: list[str] | None = None) -> int:
     ve = sub.add_parser("veto", help="root veto during the timelock")
     ve.add_argument("proposal_id")
     ve.add_argument("--reason", required=True)
+    ap_ = sub.add_parser("approvals", help="node outflows waiting for the manager")
+    ap_.add_argument("--all", action="store_true")
+    for verb in ("approve", "deny"):
+        x = sub.add_parser(verb, help=f"{verb} a pending outflow")
+        x.add_argument("approval_id")
+        x.add_argument("--note", default="")
     pe = sub.add_parser("persona", help="persona version history of a node")
     pe.add_argument("node")
     pe.add_argument("--version", type=int)
@@ -57,6 +65,24 @@ def main(argv: list[str] | None = None) -> int:
 
     token = args.token_file.read_text().strip()
     client = httpx.Client(base_url=args.url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+    if args.cmd == "approvals":
+        r = client.get("/admin/v1/approvals", params={"state": "all" if args.all else "PENDING"})
+        r.raise_for_status()
+        items = r.json()
+        if not items:
+            print("(no approvals)")
+        for a in items:
+            left = (a["deadline"] - __import__("time").time()) / 3600
+            print(f"{a['approval_id']}  [{a['state']}] {a['node']} {a['tool']} {a['amount_mP'] / 1000:g}P  "
+                  f"auto-execute in {left:.1f}h\n    {a['reason'][:200]}")
+        return 0
+    if args.cmd in ("approve", "deny"):
+        r = client.post(f"/admin/v1/approvals/{args.approval_id}", json={"decision": args.cmd, "note": args.note})
+        if r.status_code >= 400:
+            print(f"error {r.status_code}: {r.text}", file=sys.stderr)
+            return 1
+        print(f"{args.approval_id} -> {r.json()['state']}")
+        return 0
     if args.cmd == "persona":
         r = client.get(f"/admin/v1/persona/{args.node}")
         r.raise_for_status()

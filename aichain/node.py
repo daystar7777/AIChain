@@ -71,6 +71,7 @@ from aichain.mastermind.tools import (
     ToolRequestArgs,
     ToolRequestsArgs,
     ToolSubmitArgs,
+    TransferArgs,
     ToolRunArgs,
     tool_specs,
 )
@@ -170,6 +171,7 @@ class Node:
         self._used_web = False
         self._sources_warned = False
         self._tool_failures = 0
+        self._executing_approval = False
         # Node-private data never put on the chain: plaintext behind my info offers.
         self.private: dict[str, Any] = net.chain.private_for(cfg.node_id) if net.chain is not None else {}
         self.policy = PolicyGuard(cfg.node_id)
@@ -559,9 +561,10 @@ class Node:
             self.net.log(self.id, "tool_invalid", tool=name, error=str(e)[:300])
             return data_block("core", f"오류: 인자 검증 실패\n{e}")
         try:
-            if name in WRITE_TOOLS:
+            if name in WRITE_TOOLS and not self._executing_approval:
                 self.policy.check_write()
-            out = self._dispatch(name, args)
+            held = None if self._executing_approval else self._hold_for_manager(name, args, raw_args)
+            out = held if held is not None else self._dispatch(name, args)
         except PolicyViolation as e:
             self.net.log(self.id, "policy_reject", tool=name, reason=str(e))
             self.memory.remember(self.net.board.height, "episode", "self", 1.0,
@@ -960,6 +963,14 @@ class Node:
             board.cancel_loan_request(self.id, args.loan_id)
             self.policy.record_write(0, h)
             return f"{args.loan_id} 요청 취소, 담보 반환"
+        if isinstance(args, TransferArgs):
+            amount = to_mP(args.amount_P)
+            self.policy.check_spend(amount, acct.available_mP, h, bounty=False)
+            memo_hash = self.net.put_content({"memo": args.memo}, author=self.id)
+            board.transfer(self.id, args.to, amount, memo_hash)
+            self.policy.record_spend(amount, h)
+            self.net.log(self.id, "transferred", to=args.to, amount=fmt_P(amount), memo=args.memo[:200])
+            return f"{args.to}에게 {fmt_P(amount)} 송금"
         if isinstance(args, SavingsArgs):
             if args.action == "deposit":
                 if args.amount_P is None or args.term_hours is None:
@@ -1220,6 +1231,50 @@ class Node:
         if url not in self._web_seen:
             raise BoardError(f"{url}은 이번 실행에서 fetch한 페이지가 아니다. 읽은 페이지만 출처로 쓸 수 있다.")
         return self._web_seen[url]
+
+    def _outflow_amount(self, name: str, args: BaseModel) -> int | None:
+        """Points this call would send out of the node (None: not an outflow)."""
+        board = self.net.board
+        if isinstance(args, TransferArgs):
+            return to_mP(args.amount_P)
+        if isinstance(args, AskArgs):
+            return to_mP(args.reward_P)
+        if isinstance(args, ToolRequestArgs):
+            return to_mP(args.reward_P)
+        if isinstance(args, OfferBuyArgs) and args.offer_id in board.offers:
+            return board.offers[args.offer_id].price_mP
+        if isinstance(args, ToolLicenseArgs) and (args.tool_id, args.version) in board.tools:
+            return board.tools[(args.tool_id, args.version)].price_install_mP
+        if isinstance(args, LoansArgs) and args.action == "fund" and args.loan_id in board.loans:
+            return board.loans[args.loan_id].principal_mP
+        return None
+
+    def _hold_for_manager(self, name: str, args: BaseModel, raw_args: str) -> str | None:
+        book = self.net.approvals
+        amount = self._outflow_amount(name, args)
+        if book is None or amount is None:
+            return None
+        available = self.net.board.account(self.id).available_mP
+        if not book.policy.needs_approval(name, amount, available):
+            return None
+        reason = getattr(args, "memo", "") or json.dumps(json.loads(raw_args or "{}"), ensure_ascii=False)[:300]
+        a = book.request(self.id, name, raw_args or "{}", amount, reason)
+        self.net.log(self.id, "approval_requested", approval_id=a.approval_id, tool=name,
+                     amount=fmt_P(amount), deadline=a.deadline, reason=a.reason)
+        self.memory.remember(self.net.board.height, "episode", "self", 1.0,
+                             f"관리인 승인 요청 {a.approval_id}: {name} {fmt_P(amount)} ({a.reason[:120]})",
+                             ["approval"])
+        hours = book.policy.timeout_hours
+        return (f"관리인 승인 대기 {a.approval_id}: {name} {fmt_P(amount)}은 노드 자산 유출이라 사람 관리인의 승인이 "
+                f"필요하다. 승인되거나 {hours:g}시간 안에 응답이 없으면 Core가 집행하고 결과를 기억에 남긴다. "
+                f"거부되면 집행하지 않는다.")
+
+    def execute_approval(self, raw_args: str, tool: str) -> str:
+        self._executing_approval = True
+        try:
+            return self._exec_tool(tool, raw_args)
+        finally:
+            self._executing_approval = False
 
     def storage_used_kb(self) -> int:
         return -(-self.memory.usage_bytes() // 1024)

@@ -253,6 +253,36 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
             return {"node": node_id, "version": node.rollback_persona(body.version, body.note)}
         return _gov_action(fn)
 
+    class DecisionIn(BaseModel):
+        decision: str = Field(pattern="^(approve|deny)$")
+        note: str = Field(default="", max_length=500)
+
+    @app.get("/admin/v1/approvals", dependencies=[Depends(operator)])
+    def list_approvals(state: str | None = "PENDING") -> list[dict[str, Any]]:
+        from dataclasses import asdict
+
+        def fn(net: Any) -> list[dict[str, Any]]:
+            if net.approvals is None:
+                return []
+            return [asdict(a) for a in net.approvals.items.values() if state in (None, "all") or a.state == state]
+        return runtime.call(fn)
+
+    @app.post("/admin/v1/approvals/{approval_id}", dependencies=[Depends(operator)])
+    def decide_approval(approval_id: str, body: DecisionIn) -> dict[str, Any]:
+        from dataclasses import asdict
+
+        def fn(net: Any) -> dict[str, Any]:
+            if net.approvals is None:
+                raise HTTPException(404, "approvals are not enabled")
+            try:
+                a = net.approvals.decide(approval_id, body.decision == "approve", "operator", body.note)
+            except KeyError as e:
+                raise HTTPException(409, str(e)) from e
+            net.log("operator", "approval_decided", approval_id=approval_id, decision=body.decision, note=body.note)
+            net.run_approvals()
+            return asdict(a)
+        return runtime.call(fn)
+
     @app.get("/bridge/v1/network")
     def network(client: Annotated[Client, Depends(client_of)]) -> dict[str, Any]:
         return runtime.snapshot()

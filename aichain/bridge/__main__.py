@@ -60,6 +60,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tokens", type=Path, default=DEFAULT_FILE)
     ap.add_argument("--journal", type=Path, default=ROOT / "data" / "journal" / "journal.db")
     ap.add_argument("--no-journal", action="store_true")
+    ap.add_argument("--approval-threshold-P", type=float, default=100.0,
+                    help="single spends above this (or 20%% of balance) need the manager; transfers always do")
+    ap.add_argument("--approval-timeout-hours", type=float, default=72.0,
+                    help="no answer from the manager -> Core executes after this (minimum 72)")
     ap.add_argument("--journal-plaintext", choices=["on", "off"], default="on",
                     help="keep traded information bodies in the journal (development; turn off later)")
     ap.add_argument("--research", action="store_true",
@@ -119,6 +123,11 @@ def main(argv: list[str] | None = None) -> int:
                   "edited; refusing to start. Restore it from a backup or move it aside to start a "
                   "new chain.", file=sys.stderr)
             return 3
+        from aichain.manager import ApprovalBook, ManagerPolicy
+
+        net.approvals = ApprovalBook(ManagerPolicy(approval_threshold_mP=round(args.approval_threshold_P * 1000),
+                                                   timeout_hours=args.approval_timeout_hours),
+                                     ROOT / "data" / "approvals.json")
         if args.reflect_hours > 0:
             net.reflect_interval_blocks = max(1, round(args.reflect_hours * 3600 / args.block_seconds))
         journal = None

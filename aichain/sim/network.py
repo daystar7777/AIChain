@@ -34,6 +34,7 @@ class Network:
                  chain: ChainStore | None = None) -> None:
         self.gateway = gateway
         self.chain = chain
+        self.approvals = None  # ApprovalBook: outflows wait for the human manager
         self.workshop = workshop
         self.web = web
         self.knowledge = knowledge
@@ -354,6 +355,32 @@ class Network:
                                  data={"rep": self.reputation(node.id).value,
                                        "balance": self.board.account(node.id).balance_mP})
 
+    def run_approvals(self) -> None:
+        """Execute approved outflows and those whose manager did not answer before the timeout."""
+        if self.approvals is None:
+            return
+        for a in self.approvals.due():
+            node = self.nodes.get(a.node)
+            if node is None:
+                continue
+            result = node.execute_approval(a.args, a.tool)
+            ok = not any(result.startswith(f'<data source="core">\n{p}')
+                         for p in ("오류", "거부", "웹 오류", "내부 오류", "관리인 승인 대기"))
+            self.approvals.finish(a, ok, result)
+            self.log(a.node, "approval_executed", approval_id=a.approval_id, tool=a.tool, by=a.decided_by,
+                     ok=ok, result=result[:300])
+            node.memory.remember(self.board.height, "episode", f"manager:{a.approval_id}", 1.0,
+                                 f"관리인 승인 건 {a.approval_id} ({a.tool}) {'집행' if ok else '실패'} "
+                                 f"[{a.decided_by}]: {result[:300]}", ["approval"])
+        for a in list(self.approvals.items.values()):
+            if a.state == "DENIED" and not a.result:
+                a.result = "denied"
+                node = self.nodes.get(a.node)
+                if node is not None:
+                    node.memory.remember(self.board.height, "episode", f"manager:{a.approval_id}", 1.0,
+                                         f"관리인이 {a.approval_id} ({a.tool})을 거부함: {a.note}", ["approval"])
+                self.log(a.node, "approval_denied", approval_id=a.approval_id, note=a.note)
+
     def research(self, node_ids: list[str] | None = None) -> None:
         for node in self.nodes.values():
             if (node_ids is None or node.id in node_ids) and node.cfg.interests:
@@ -386,6 +413,7 @@ class Network:
                         pass
             for node in self.nodes.values():
                 node.run_duties()
+            self.run_approvals()
             self.run_until_idle()
 
     def balances(self) -> dict[str, dict[str, int]]:

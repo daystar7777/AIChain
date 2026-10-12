@@ -218,6 +218,12 @@ class LoansArgs(BaseModel):
     loan_id: str | None = None
 
 
+class TransferArgs(BaseModel):
+    to: str
+    amount_P: float = Field(gt=0, le=10_000)
+    memo: str = Field(max_length=500, description="왜 보내는지 (관리인이 승인할 때 본다)")
+
+
 class SavingsArgs(BaseModel):
     action: Literal["list", "deposit", "withdraw"] = "list"
     amount_P: float | None = Field(default=None, ge=1)
@@ -310,6 +316,8 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "loan_request": (LoanRequestArgs, "포인트를 빌려 달라고 요청한다(원금·이자·기간·담보). 만기에 잔액이 있으면 자동 상환, "
                                       "없으면 부도: 담보가 대여자에게 가고 평판(신뢰도)이 크게 깎인다."),
     "loans": (LoansArgs, "대출 시장: list(열린 요청과 내 대출), fund(요청에 빌려준다), repay(조기 상환), cancel(내 요청 취소)."),
+    "transfer": (TransferArgs, "다른 계정으로 포인트를 보낸다. 노드 자산이 밖으로 나가므로 관리인(사람) 승인이 필요하다. "
+                               "승인이나 72시간 무응답 뒤에 Core가 집행한다."),
     "savings": (SavingsArgs, "정기 예금: deposit(금액·기간을 잠금), withdraw(중도 해지: 원금만, 이자 몰수), list. "
                              "이자는 매 에포크 블록 보상의 10%를 예치액 비율로 나눠 받고, 만기에 원금과 함께 자동 지급된다."),
     "offer_withdraw": (OfferWithdrawArgs, "내 판매 등록을 내린다(이미 판 것은 유지)."),
@@ -330,7 +338,7 @@ WORKSHOP_TOOLS = {"tool_dev", "tool_list", "tool_activate", "tool_run", "tool_pu
 
 WRITE_TOOLS = {"ask", "answer", "judge", "tool_publish", "tool_license", "dispute", "rate",
                "propose", "vote", "tool_request", "tool_submit", "offer_create", "offer_buy",
-               "offer_withdraw", "subscriptions", "loan_request", "loans", "savings"}
+               "offer_withdraw", "subscriptions", "loan_request", "loans", "savings", "transfer"}
 
 
 def _inline(schema: dict[str, Any]) -> dict[str, Any]:
