@@ -176,6 +176,27 @@ class PersonaEditArgs(BaseModel):
                             description="근거 기억 번호(#seq). 내 경험(self 또는 chain 출처)이 하나 이상 있어야 한다")
 
 
+class ToolRequestArgs(BaseModel):
+    title: str = Field(max_length=200, description="필요한 도구 이름/한 줄 설명")
+    description: str = Field(max_length=4000, description="무엇을 해야 하는지, 입력과 출력의 의미")
+    input_schema: dict = Field(default_factory=lambda: {"type": "object"})
+    output_schema: dict = Field(default_factory=lambda: {"type": "object"})
+    tests: list[ToolTest] = Field(min_length=3, max_length=20,
+                                  description="합격 기준: 이 테스트를 모두 통과한 도구가 보상을 받는다")
+    reward_P: float = Field(ge=1, description="보상(P). 즉시 잠긴다")
+    deadline_hours: float = Field(default=24, ge=0.2, le=168)
+
+
+class ToolRequestsArgs(BaseModel):
+    request_id: str | None = Field(default=None, description="지정하면 설명과 합격 테스트 전체를 보여준다")
+
+
+class ToolSubmitArgs(BaseModel):
+    request_id: str
+    tool_id: str = Field(description="시장에 올린 내 도구")
+    version: int
+
+
 class ToolPublishArgs(BaseModel):
     tool_id: str
     version: int = Field(description="테스트를 통과한 내 도구 버전")
@@ -225,6 +246,11 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "tool_activate": (ToolActivateArgs, "테스트를 통과한 버전을 활성화한다. 실패한 업데이트는 current를 바꾸지 않는다."),
     "tool_run": (ToolRunArgs, "활성화된 내 도구, 또는 라이선스를 산 다른 노드의 도구를 실행한다. "
                               "남의 도구는 호출마다 사용료가 나간다. 결과는 <data source=\"tool:...\">다."),
+    "tool_request": (ToolRequestArgs, "도구 구매 요청을 낸다: 필요한 도구의 설명·합격 테스트·보상을 걸면, 다른 노드가 만들어 "
+                                      "제출하고 테스트를 처음 통과한 도구가 보상을 받는다. 나는 그 도구 라이선스를 얻는다."),
+    "tool_requests": (ToolRequestsArgs, "열린 도구 구매 요청 목록, 또는 한 요청의 설명과 합격 테스트를 본다."),
+    "tool_submit": (ToolSubmitArgs, "도구 구매 요청에 내 도구 버전을 제출한다. Core가 요청자의 합격 테스트를 격리 실행해 "
+                                    "통과하면 즉시 보상을 받는다(분쟁 기간 동안 잠김)."),
     "tool_publish": (ToolPublishArgs, "테스트를 통과한 내 도구 버전을 시장에 올린다(가격 지정)."),
     "tool_market": (ToolMarketArgs, "다른 노드들이 올린 도구 목록을 본다: 설명, 가격, 작성자 평판, 판매 수."),
     "tool_license": (ToolLicenseArgs, "다른 노드의 도구 라이선스를 산다. 가격이 바로 작성자에게 간다."),
@@ -233,10 +259,10 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
 
 WEB_TOOLS = {"search", "fetch", "note"}
 WORKSHOP_TOOLS = {"tool_dev", "tool_list", "tool_activate", "tool_run", "tool_publish",
-                  "tool_market", "tool_license"}
+                  "tool_market", "tool_license", "tool_request", "tool_requests", "tool_submit"}
 
 WRITE_TOOLS = {"ask", "answer", "judge", "tool_publish", "tool_license", "dispute", "rate",
-               "propose", "vote"}
+               "propose", "vote", "tool_request", "tool_submit"}
 
 
 def _inline(schema: dict[str, Any]) -> dict[str, Any]:

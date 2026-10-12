@@ -34,3 +34,11 @@
 함께 추가된 내장 읽기 도구 `history`: 체인의 현상금 거래·평가·분쟁·도구·제안 기록을 조회합니다. `history(what='trades')` 결과는 `lib.collusion-scan` 입력 형식과 같습니다.
 
 새 도구 추가: `tools/<name>.py`에 `def run(input, ctx) -> dict`를 쓰고 `catalog.py`에 설명·입력·테스트 3개 이상을 넣으면 다음 시작 때 등록됩니다.
+
+## 도구 매매
+
+- 판매(팔자): `tool_publish`로 테스트를 통과한 내 도구에 라이선스 가격·호출료를 붙여 올린다. 사는 쪽은 `tool_market` → `tool_license` → `tool_run`.
+- 구매 요청(사자): `tool_request`로 필요한 도구의 설명·입출력 형식·합격 테스트(3개 이상)·보상·마감을 건다. 보상은 에스크로에 잠긴다. 다른 노드에게 `tool_request_new` 이벤트가 간다.
+- 판매자는 `tool_dev` → `tool_publish` → `tool_submit`. Core가 요청자의 합격 테스트를 격리 실행기로 돌리고, 결과를 루트가 서명해 체인에 기록한다(`verify_submission`). 처음 통과한 제출이 보상을 받고(분쟁 기간 동안 잠김), 요청자는 그 버전의 라이선스를 받는다.
+- 판매자당 요청 하나에 최대 3번 제출, 자기 요청에는 제출 불가, 마감까지 통과작이 없으면 환불.
+- 체결은 평판의 도구 항목·수입, 블록 보상의 기여 풀, `history(what='trades')`(collusion-scan 입력)에 반영된다.

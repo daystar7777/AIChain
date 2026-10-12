@@ -165,6 +165,24 @@ class Proposal:
 
 
 @dataclass
+class ToolRequest:
+    """A buy order for a tool (도구 구매 요청): the buyer locks a reward; the first submitted tool
+    version that passes the buyer's acceptance tests (run by Core, recorded by root) wins it."""
+    request_id: str
+    buyer: str
+    title: str
+    spec_hash: str
+    tests_hash: str
+    reward_mP: int
+    created_height: int
+    deadline: int
+    state: str = "OPEN"  # OPEN | FULFILLED | EXPIRED
+    submissions: list[dict[str, Any]] = field(default_factory=list)
+    winner: str | None = None
+    winner_tool: list | None = None  # [tool_id, version]
+
+
+@dataclass
 class ToolListing:
     tool_id: str
     version: int
@@ -229,6 +247,7 @@ class Board:
         self.tools: dict[tuple[str, int], ToolListing] = {}
         self.disputes: dict[str, Dispute] = {}
         self.proposals: dict[str, Proposal] = {}
+        self.tool_requests: dict[str, ToolRequest] = {}
         self.ratings: dict[str, Rating] = {}
         self.licenses: set[tuple[str, str, int]] = set()  # (account, tool_id, version)
 
@@ -268,6 +287,7 @@ class Board:
             "ratings": {k: asdict(v) for k, v in sorted(self.ratings.items())},
             "proposals": {k: asdict(v) for k, v in sorted(self.proposals.items())},
             "params": asdict(self.params),
+            "tool_requests": {k: asdict(v) for k, v in sorted(self.tool_requests.items())},
         }
         return sha256_hex(canonical_json(state))
 
@@ -736,6 +756,58 @@ class Board:
         self._rep(listing.author, "tool_called", tool_id=tool_id, version=version,
                   calls=calls, value_mP=amount)
 
+    # ---- tool buy orders ----
+
+    @transaction
+    def create_tool_request(self, buyer: str, title: str, spec_hash: str, tests_hash: str,
+                            reward_mP: int, deadline_blocks: int) -> ToolRequest:
+        if reward_mP < self.params.min_reward_mP:
+            raise BoardError(f"reward must be at least {self.params.min_reward_mP}mP")
+        if not 120 <= deadline_blocks <= 17_280 * 7:
+            raise BoardError("deadline must be between 120 blocks (10 min) and 7 days")
+        self._debit_to_escrow(self.account(buyer), reward_mP)
+        req = ToolRequest(self._new_id("tr_", buyer, title), buyer, title[:200], spec_hash, tests_hash,
+                          reward_mP, self.height, self.height + deadline_blocks)
+        self.tool_requests[req.request_id] = req
+        return req
+
+    @transaction
+    def submit_tool(self, seller: str, request_id: str, tool_id: str, version: int) -> None:
+        req = self.tool_requests.get(request_id)
+        if req is None or req.state != "OPEN":
+            raise BoardError("no open tool request with that id")
+        if seller == req.buyer:
+            raise BoardError("cannot fill your own request")
+        listing = self._listing(tool_id, version)
+        if listing.author != seller or listing.withdrawn:
+            raise BoardError("submit a version of your own published tool")
+        if any(x["tool_id"] == tool_id and x["version"] == version for x in req.submissions):
+            raise BoardError("this version was already submitted")
+        if sum(1 for x in req.submissions if x["seller"] == seller) >= 3:
+            raise BoardError("at most 3 submissions per seller")
+        req.submissions.append({"seller": seller, "tool_id": tool_id, "version": version,
+                                "height": self.height, "passed": None})
+
+    @transaction
+    def verify_submission(self, verifier: str, request_id: str, tool_id: str, version: int,
+                          passed: bool, report_hash: str) -> ToolRequest:
+        """Root records the outcome of running the buyer's tests on a submission."""
+        req = self.tool_requests.get(request_id)
+        if req is None:
+            raise BoardError("unknown tool request")
+        sub = next((x for x in req.submissions if x["tool_id"] == tool_id and x["version"] == version
+                    and x["passed"] is None), None)
+        if sub is None:
+            raise BoardError("no pending submission for that tool version")
+        sub["passed"], sub["report_hash"] = bool(passed), report_hash
+        if passed and req.state == "OPEN":
+            req.state, req.winner, req.winner_tool = "FULFILLED", sub["seller"], [tool_id, version]
+            self._pay_from_escrow(sub["seller"], req.reward_mP, lock=True)
+            self.licenses.add((req.buyer, tool_id, version))
+            self._rep(sub["seller"], "tool_licensed", tool_id=tool_id, version=version,
+                      value_mP=req.reward_mP, via=request_id)
+        return req
+
     def has_license(self, account: str, tool_id: str, version: int) -> bool:
         return (account, tool_id, version) in self.licenses
 
@@ -792,6 +864,11 @@ class Board:
             ev = self._issue_epoch(h // self.params.epoch_blocks - 1)
             if ev:
                 events.append(ev)
+        for req in self.tool_requests.values():
+            if req.state == "OPEN" and h >= req.deadline:
+                req.state = "EXPIRED"
+                self._pay_from_escrow(req.buyer, req.reward_mP, lock=False)
+                events.append(BoardEvent("tool_request_expired", None, {"request_id": req.request_id}))
         for prop in self.proposals.values():
             if prop.state == "VOTING" and h >= prop.vote_until:
                 events.append(self._tally(prop))

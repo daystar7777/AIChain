@@ -200,6 +200,18 @@ class Workshop:
         except ExecutionFailed as e:
             raise WorkshopError(f"tool failed: {e}") from e
 
+    def run_tests(self, tool_id: str, version: int, tests: list[dict[str, Any]]) -> tuple[bool, list[dict[str, Any]]]:
+        """Run someone else's acceptance tests against a stored version (tool buy orders)."""
+        st = self.tools.get(tool_id)
+        if st is None or version not in st.versions:
+            raise WorkshopError(f"{tool_id} v{version} is not in the workshop")
+        tv = st.versions[version]
+        probe = ToolVersion(tool_id, version, tv.manifest, tv.code, tests, "acceptance", tv.code_hash, 0)
+        status, report = self._test(probe)
+        if status == "not-run":
+            raise WorkshopError("tool execution is disabled; cannot verify")
+        return status == "passed", report
+
     def _owned(self, owner: str, tool_id: str) -> ToolState:
         st = self.tools.get(tool_id)
         if st is None:

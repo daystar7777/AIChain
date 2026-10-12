@@ -103,6 +103,35 @@ class Network:
                     and self.gateway.has_daily_room(node.id):
                 node.enqueue("proposal_open", {"proposal_id": proposal_id})
 
+    def announce_tool_request(self, request_id: str) -> None:
+        req = self.board.tool_requests[request_id]
+        for node in self.nodes.values():
+            if node.id != req.buyer and "tool_submit" in node.tool_names() \
+                    and self.gateway.has_daily_room(node.id):
+                node.enqueue("tool_request_new", {"request_id": request_id})
+
+    def verify_tool_submission(self, request_id: str, tool_id: str, version: int) -> Any:
+        """Core runs the buyer's acceptance tests on the submitted version in the isolated
+        executor; root records the result on chain (objective, no LLM judgement)."""
+        req = self.board.tool_requests[request_id]
+        tests = self.content.get(req.tests_hash) or []
+        try:
+            passed, report = self.workshop.run_tests(tool_id, version, tests)
+        except Exception as e:  # unknown tool, execution disabled, executor failure
+            passed, report = False, [{"error": f"{type(e).__name__}: {e}"[:300]}]
+        report_hash = self.put_content(report, author="core")
+        req = self.board.verify_submission("root", request_id, tool_id, version, passed, report_hash)
+        self.log("core", "tool_submission_verified", request_id=request_id, tool_id=tool_id,
+                 version=version, passed=passed, state=req.state, winner=req.winner)
+        if req.state == "FULFILLED" and req.winner_tool == [tool_id, version]:
+            for nid in (req.buyer, req.winner):
+                if nid in self.nodes:
+                    self.nodes[nid].memory.remember(
+                        self.board.height, "episode", f"chain:{request_id}", 1.0,
+                        f"도구 구매 요청 {request_id} '{req.title}' 체결: {req.winner}의 {tool_id} v{version}, "
+                        f"보상 {req.reward_mP / 1000:g}P", tags=["tool", "trade"])
+        return req
+
     def notify_dispute(self, dispute_id: str) -> None:
         """Core memory for both parties (no LLM call): opened or resolved."""
         d = self.board.disputes[dispute_id]
@@ -174,6 +203,12 @@ class Network:
                             self.board.height, "episode", f"chain:{prop.proposal_id}", 1.0,
                             f"제안 {prop.proposal_id} '{prop.title}' → {prop.state} {prop.tally or ''}",
                             tags=["governance"])
+            elif ev.kind == "tool_request_expired":
+                req = self.board.tool_requests[ev.payload["request_id"]]
+                if req.buyer in self.nodes:
+                    self.nodes[req.buyer].memory.remember(
+                        self.board.height, "episode", f"chain:{req.request_id}", 1.0,
+                        f"도구 구매 요청 {req.request_id} '{req.title}' 마감: 통과작 없음, 보상 환불", tags=["tool"])
             elif ev.kind == "epoch_issued":
                 pass  # logged above; balances already credited
             elif ev.kind == "dispute_resolved":

@@ -60,6 +60,9 @@ from aichain.mastermind.tools import (
     ToolLicenseArgs,
     ToolMarketArgs,
     ToolPublishArgs,
+    ToolRequestArgs,
+    ToolRequestsArgs,
+    ToolSubmitArgs,
     ToolRunArgs,
     tool_specs,
 )
@@ -83,6 +86,7 @@ PRIORITY = {
     "answer_revealed": 3,
     "bridge_question": 3,
     "review_settled": 3,
+    "tool_request_new": 3,
     "peer_msg": 4,
     "idle_tick": 5,
     "research_tick": 5,
@@ -379,6 +383,16 @@ class Node:
                      + f"\n## 현재 성향 레이어 (v{self.persona_version})\n{escape_data(self.persona_text)}\n"
                      + f"\n## 성향 수정 기록\n{hist}")
             attrs = f'version="{self.persona_version}"'
+        elif ev.kind == "tool_request_new":
+            req = board.tool_requests[p["request_id"]]
+            body = {"spec": self.net.content.get(req.spec_hash), "tests": self.net.content.get(req.tests_hash)}
+            inner = ("다른 노드가 도구 구매 요청을 냈다. 내가 만들 수 있고 보상이 수고에 맞으면: tool_dev로 만들고(요청자의 "
+                     "테스트를 내 테스트에도 넣어 미리 확인), tool_publish로 올린 뒤 tool_submit으로 제출한다. "
+                     "테스트를 처음 통과한 제출만 보상을 받는다. 만들 수 없거나 가치가 없으면 그냥 끝낸다.\n"
+                     + data_block(f"peer:{req.buyer}", json.dumps(body, ensure_ascii=False, indent=1),
+                                  trust=self.net.reputation(req.buyer).value))
+            attrs = (f'request_id="{req.request_id}" buyer="{req.buyer}" reward="{fmt_P(req.reward_mP)}" '
+                     f'deadline="{req.deadline}"')
         elif ev.kind == "review_settled":
             b = board.bounty(p["bounty_id"])
             q = self.net.content.get(b.question_hash)
@@ -729,6 +743,47 @@ class Node:
             self.net.log(self.id, "rated", subject=args.subject, score=args.score,
                          context_ref=args.context_ref, comment=args.comment[:200])
             return f"{args.subject}를 {args.score:+d}로 평가함 ({r.rating_id})"
+        if isinstance(args, ToolRequestArgs):
+            reward = to_mP(args.reward_P)
+            self.policy.check_spend(reward, acct.available_mP, h, bounty=True)
+            spec_hash = self.net.put_content({"title": args.title, "description": args.description,
+                                              "input_schema": args.input_schema,
+                                              "output_schema": args.output_schema}, author=self.id)
+            tests_hash = self.net.put_content([t.model_dump() for t in args.tests], author=self.id)
+            req = board.create_tool_request(self.id, args.title, spec_hash, tests_hash, reward,
+                                            max(120, round(args.deadline_hours * 720)))
+            self.policy.record_write(reward, h)
+            self.net.log(self.id, "tool_request_created", request_id=req.request_id, title=req.title,
+                         reward=fmt_P(reward), deadline=req.deadline, tests=len(args.tests))
+            self.net.announce_tool_request(req.request_id)
+            return (f"도구 구매 요청 {req.request_id}: '{req.title}', 보상 {fmt_P(reward)} 잠김, "
+                    f"마감 블록 {req.deadline}")
+        if isinstance(args, ToolRequestsArgs):
+            if args.request_id:
+                req = board.tool_requests.get(args.request_id)
+                if req is None:
+                    raise BoardError("unknown tool request")
+                return Prewrapped(data_block(f"peer:{req.buyer}", json.dumps(
+                    {"request_id": req.request_id, "buyer": req.buyer, "state": req.state,
+                     "reward": fmt_P(req.reward_mP), "deadline": req.deadline,
+                     "spec": self.net.content.get(req.spec_hash), "tests": self.net.content.get(req.tests_hash),
+                     "submissions": req.submissions}, ensure_ascii=False, indent=1),
+                    trust=self.net.reputation(req.buyer).value))
+            rows = [f"- {r.request_id} [{r.state}] {r.title} | 보상 {fmt_P(r.reward_mP)} | 요청자 {r.buyer} | "
+                    f"마감 #{r.deadline} | 제출 {len(r.submissions)}"
+                    for r in board.tool_requests.values() if r.state == "OPEN"]
+            return Prewrapped(data_block("market", "\n".join(rows) or "(열린 구매 요청 없음)"))
+        if isinstance(args, ToolSubmitArgs):
+            board.submit_tool(self.id, args.request_id, args.tool_id, args.version)
+            self.policy.record_write(0, h)
+            req = self.net.verify_tool_submission(args.request_id, args.tool_id, args.version)
+            sub = next(x for x in req.submissions if x["tool_id"] == args.tool_id and x["version"] == args.version)
+            if req.winner == self.id and req.winner_tool == [args.tool_id, args.version]:
+                return (f"합격: {req.request_id}의 테스트를 모두 통과해 보상 {fmt_P(req.reward_mP)}을 받았다 "
+                        f"(분쟁 기간 동안 잠김). 요청자에게 라이선스가 부여됐다.")
+            report = (self.net.content.get(sub.get("report_hash")) or [])[:5]
+            return Prewrapped(data_block("workshop", f"불합격: 요청자의 테스트를 통과하지 못했다.\n"
+                                         + json.dumps(report, ensure_ascii=False)[:1500]))
         if isinstance(args, ToolPublishArgs):
             ws = self.net.workshop
             st = ws.tools.get(args.tool_id)
@@ -839,7 +894,8 @@ class Node:
         if self.net.workshop is not None and active:
             names += ["tool_dev", "tool_list", "tool_activate", "tool_publish", "tool_market"]
             if self.net.workshop.can_execute:
-                names += ["tool_license", "tool_run"]  # buying only makes sense if tools can run
+                # Buying, running and buy orders need execution (verification runs the tests).
+                names += ["tool_license", "tool_run", "tool_request", "tool_requests", "tool_submit"]
         if self.current_event is not None and self.current_event.kind == "reflect":
             names.append("persona_edit")
         return names + ["done"]
@@ -860,6 +916,14 @@ class Node:
                                  "reward": b.reward_mP / 1000, "height": b.created_at,
                                  "outcome": str(b.outcome) if b.outcome else str(b.state),
                                  **({"title": q.get("title", "")[:80]} if what == "bounties" else {})})
+            if what == "trades":
+                for r in board.tool_requests.values():
+                    for sub in r.submissions:
+                        if rel(r.buyer, sub["seller"]):
+                            rows.append({"request_id": r.request_id, "asker": r.buyer, "answerer": sub["seller"],
+                                         "accepted": r.winner_tool == [sub["tool_id"], sub["version"]],
+                                         "rejected": sub["passed"] is False, "reward": r.reward_mP / 1000,
+                                         "height": sub["height"], "outcome": r.state, "kind": "tool_request"})
             return rows[-limit:]
         if what == "ratings":
             return [{"rater": r.rater, "subject": r.subject, "score": r.score, "bounty": r.context_ref,

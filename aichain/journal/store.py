@@ -295,6 +295,10 @@ def network_snapshot(net: Any) -> dict[str, Any]:
                       for x in board.proposals.values()],
         "params": {k: getattr(board.params, k) for k in ("commit_blocks", "reveal_blocks", "judge_blocks",
                                                           "dispute_blocks", "commit_bond_mP", "block_reward_mP")},
+        "tool_requests": [{"request_id": r.request_id, "buyer": r.buyer, "title": r.title, "state": r.state,
+                           "reward": fmt_P(r.reward_mP), "deadline": r.deadline,
+                           "submissions": len(r.submissions), "winner": r.winner}
+                          for r in board.tool_requests.values()],
         "tools": [{"tool_id": t.tool_id, "version": t.version, "author": t.author,
                    "price_install": fmt_P(t.price_install_mP), "price_call": fmt_P(t.price_call_mP),
                    "sold": sum(1 for (_, tid, v) in board.licenses if tid == t.tool_id and v == t.version),

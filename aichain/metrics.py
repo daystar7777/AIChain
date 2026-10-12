@@ -57,7 +57,9 @@ def compute(net: Any) -> dict[str, Any]:
         "disputes": {s: sum(1 for d in board.disputes.values() if d.state == s)
                      for s in ("open", "upheld", "rejected", "void")},
         "ratings": len([r for r in board.ratings.values() if not r.void]),
-        "tools": {"listed": len(board.tools), "licenses": len(board.licenses)},
+        "tools": {"listed": len(board.tools), "licenses": len(board.licenses),
+                  "requests_open": sum(1 for r in board.tool_requests.values() if r.state == "OPEN"),
+                  "requests_fulfilled": sum(1 for r in board.tool_requests.values() if r.state == "FULFILLED")},
         "proposals": {s: sum(1 for p in board.proposals.values() if p.state == s)
                       for s in {p.state for p in board.proposals.values()}},
         "vote_agreement": vote_agreement(list(board.proposals.values())),
