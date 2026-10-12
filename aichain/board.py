@@ -184,7 +184,7 @@ class ToolRequest:
 
 
 # info: sealed content (many buyers). llm_calls / tool_runs: a lot of today's quota (one buyer).
-OFFER_KINDS = {"info", "llm_calls", "tool_runs", "subscription"}
+OFFER_KINDS = {"info", "llm_calls", "tool_runs", "subscription", "storage"}
 
 
 @dataclass
@@ -218,6 +218,7 @@ class Purchase:
     state: str = "PENDING"  # PENDING DELIVERED COMPLETED REFUNDED DISPUTED
     ciphertext_hash: str | None = None
     released_height: int | None = None
+    until: int | None = None  # storage leases: end of the lease
 
 
 @dataclass
@@ -880,6 +881,8 @@ class Board:
             raise BoardError("resource lots hold 1..100 units")
         if kind == "subscription" and not 720 <= period_blocks <= 17_280 * 7:
             raise BoardError("a subscription period is between 1 hour and 7 days")
+        if kind == "storage" and (not 1 <= quantity <= 10_240 or not 720 <= period_blocks <= 17_280 * 30):
+            raise BoardError("storage leases are 1..10240 KB for 1 hour..30 days")
         if not 0 < price_mP <= 100_000:
             raise BoardError("price must be 1mP..100P")
         if not 720 <= expires_blocks <= 17_280 * 30:
@@ -888,8 +891,8 @@ class Board:
             raise BoardError("at most 20 open offers per account")
         o = Offer(self._new_id("o_", seller, title), seller, kind, title[:200], terms_hash, price_mP,
                   content_commit, self.height, self.height + expires_blocks,
-                  quantity=quantity if kind in ("llm_calls", "tool_runs") else 1,
-                  period_blocks=period_blocks if kind == "subscription" else 0)
+                  quantity=quantity if kind in ("llm_calls", "tool_runs", "storage") else 1,
+                  period_blocks=period_blocks if kind in ("subscription", "storage") else 0)
         self.offers[o.offer_id] = o
         return o
 
@@ -941,6 +944,8 @@ class Board:
             offer.sold += 1
             if offer.kind != "info":
                 offer.state = "SOLD"
+            if offer.kind == "storage":
+                p.until = self.height + offer.period_blocks
             self._rep(p.seller, "info_sold", offer_id=p.offer_id, value_mP=p.price_mP, offer_kind=offer.kind)
         else:  # content does not match the commitment: the operator decides, payment stays escrowed
             p.state = "DISPUTED"
@@ -1113,6 +1118,18 @@ class Board:
             self._rep(sub["seller"], "tool_licensed", tool_id=tool_id, version=version,
                       value_mP=req.reward_mP, via=request_id)
         return req
+
+    def storage_leases(self, account: str) -> tuple[int, int]:
+        """KB leased in and out by `account` that are still running."""
+        lin = lout = 0
+        for p in self.purchases.values():
+            if p.state == "COMPLETED" and p.until is not None and self.height < p.until:
+                kb = self.offers[p.offer_id].quantity
+                if p.buyer == account:
+                    lin += kb
+                if p.seller == account:
+                    lout += kb
+        return lin, lout
 
     def has_license(self, account: str, tool_id: str, version: int) -> bool:
         return (account, tool_id, version) in self.licenses

@@ -80,6 +80,8 @@ from aichain.chain.errors import ChainHalted
 if TYPE_CHECKING:
     from aichain.sim.network import Network
 
+# Memory storage quota per node before leases (KB).
+STORAGE_BASE_KB = 1024
 # Default trust of web-sourced memories (04 doc 4.1, 05 doc 1.4).
 WEB_TRUST = 0.3
 # 04 doc 3.3: argument errors may be retried twice; the third consecutive failure ends the episode.
@@ -303,6 +305,7 @@ class Node:
             f"- LLM 예산 {self.bucket.remaining()} 토큰, 상태 {self.bucket.state}\n"
             f"- 오늘 남은 할당량: LLM 호출 {self.net.gateway.remaining(self.id, 'llm_calls') if self.net.gateway.remaining(self.id, 'llm_calls') is not None else '제한 없음'}, "
             f"도구 실행 {self.net.gateway.remaining(self.id, 'tool_runs')} (offers로 사고팔 수 있다)\n"
+            f"- 기억 저장 공간 {self.storage_used_kb()}/{self.storage_quota_kb()}KB\n"
             f"- 내가 판정할 현상금 {len(to_judge)}개\n"
             f"- 판매 중인 정보·할당량 {sum(1 for o in board.offers.values() if o.state == 'OPEN' and o.seller != self.id)}개 (offers로 보기)\n\n"
             "### 열린 현상금\n"
@@ -600,6 +603,12 @@ class Node:
                 return "관련 기억 없음"
             return "\n".join(f"#{r.seq} [{r.kind}] source={r.source} trust={r.trust:.2f}: {r.content}"
                              for r in recs)
+        if isinstance(args, (RememberArgs, NoteArgs)):
+            new_kb = (len(args.content.encode()) if isinstance(args, RememberArgs)
+                      else len(args.model_dump_json().encode())) / 1024
+            if self.storage_used_kb() + new_kb > self.storage_quota_kb():
+                raise BoardError(f"저장 공간이 가득 찼다({self.storage_used_kb()}/{self.storage_quota_kb()}KB). "
+                                 "offers에서 storage를 임대하거나, 같은 주제 노트를 갱신해 정리한다.")
         if isinstance(args, RememberArgs):
             if args.source_url:
                 content_hash = self._require_fetched(args.source_url)
@@ -770,6 +779,19 @@ class Node:
             self.net.log(self.id, "rated", subject=args.subject, score=args.score,
                          context_ref=args.context_ref, comment=args.comment[:200])
             return f"{args.subject}를 {args.score:+d}로 평가함 ({r.rating_id})"
+        if isinstance(args, OfferCreateArgs) and args.kind == "storage":
+            if args.quantity > self.storage_free_kb():
+                raise BoardError(f"남는 저장 공간이 {self.storage_free_kb()}KB뿐이다")
+            terms_hash = self.net.put_content({"title": args.title, "summary": args.summary, "kind": "storage",
+                                               "kb": args.quantity, "period_hours": args.period_hours},
+                                              author=self.id)
+            offer = board.create_offer(self.id, "storage", args.title, terms_hash, to_mP(args.price_P), None,
+                                       round(args.expires_hours * 720), args.quantity,
+                                       period_blocks=round(args.period_hours * 720))
+            self.policy.record_write(0, h)
+            self.net.log(self.id, "offer_created", offer_id=offer.offer_id, title=offer.title,
+                         price=fmt_P(offer.price_mP), kind="storage", quantity=args.quantity, chars=0)
+            return f"저장 공간 임대 등록 {offer.offer_id}: {args.quantity}KB, {args.period_hours:g}시간, {fmt_P(offer.price_mP)}"
         if isinstance(args, OfferCreateArgs) and args.kind == "subscription":
             if not args.note_topic or self.memory.latest_note(args.note_topic) is None:
                 raise BoardError("구독은 내 지식 노트 주제(note_topic)로만 판다")
@@ -834,7 +856,8 @@ class Node:
                 mine = any(pu.offer_id == o.offer_id and pu.buyer == self.id and pu.state != "REFUNDED"
                            for pu in board.purchases.values())
                 what_ = ("정보" if o.kind == "info" else f"구독 {o.period_blocks / 720:g}시간마다"
-                         if o.kind == "subscription" else f"{o.kind} {o.quantity}개")
+                         if o.kind == "subscription" else f"저장 공간 {o.quantity}KB {o.period_blocks / 720:g}시간"
+                         if o.kind == "storage" else f"{o.kind} {o.quantity}개")
                 rows.append(f"- {o.offer_id}{'(구매함)' if mine else ''} [{what_}]: {o.title} | {fmt_P(o.price_mP)} | "
                             f"판매자 {o.seller} 평판 {self.net.reputation(o.seller).value:.2f} | 판매 {o.sold} | "
                             f"요약: {terms.get('summary', '')[:200]}")
@@ -854,13 +877,19 @@ class Node:
                     return head
                 return Prewrapped(data_block("core", head) + "\n" + data_block(
                     f"deal:{offer.seller}", first[:8000], trust=self.net.reputation(offer.seller).value))
-            if offer.kind != "info":
+            if offer.kind in ("llm_calls", "tool_runs"):
                 left = self.net.gateway.remaining(offer.seller, offer.kind)
                 if left is not None and left < offer.quantity:
                     raise BoardError(f"판매자에게 오늘 남은 {offer.kind}이 {left}개뿐이라 이 묶음을 팔 수 없다")
+            if offer.kind == "storage" and offer.seller in self.net.nodes \
+                    and self.net.nodes[offer.seller].storage_free_kb() < offer.quantity:
+                raise BoardError("판매자에게 그만큼의 빈 저장 공간이 없다")
             pu = board.buy_offer(self.id, args.offer_id)
             self.policy.record_write(offer.price_mP, h)
             plaintext = self.net.complete_purchase(pu.purchase_id)
+            if offer.kind == "storage" and pu.state == "COMPLETED":
+                return (f"저장 공간 {offer.quantity}KB 임대 완료(블록 {pu.until}까지). "
+                        f"현재 사용 {self.storage_used_kb()}/{self.storage_quota_kb()}KB")
             if offer.kind != "info" and pu.state == "COMPLETED":
                 return (f"임대 완료: {offer.kind} {offer.quantity}개를 받았다(오늘 자정 UTC까지). "
                         f"오늘 남은 {offer.kind}: {self.net.gateway.remaining(self.id, offer.kind)}")
@@ -1171,6 +1200,16 @@ class Node:
         if url not in self._web_seen:
             raise BoardError(f"{url}은 이번 실행에서 fetch한 페이지가 아니다. 읽은 페이지만 출처로 쓸 수 있다.")
         return self._web_seen[url]
+
+    def storage_used_kb(self) -> int:
+        return -(-self.memory.usage_bytes() // 1024)
+
+    def storage_quota_kb(self) -> int:
+        lin, lout = self.net.board.storage_leases(self.id)
+        return STORAGE_BASE_KB + lin - lout
+
+    def storage_free_kb(self) -> int:
+        return max(0, self.storage_quota_kb() - self.storage_used_kb())
 
     def _peer_reputations(self) -> str:
         return ", ".join(f"{nid} {self.net.reputation(nid).value:.2f}"

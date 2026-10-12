@@ -119,6 +119,13 @@ class Memory:
             self.store.append(self.node_id, rec)
         return rec
 
+    def usage_bytes(self) -> int:
+        """Storage used by this node's memory (content plus structured data)."""
+        import json as _json
+
+        return sum(len(r.content.encode()) + (len(_json.dumps(r.data, ensure_ascii=False).encode()) if r.data else 0)
+                   for r in self.records)
+
     def verify_chain(self) -> bool:
         prev = GENESIS
         for r in self.records:

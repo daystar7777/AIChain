@@ -116,6 +116,17 @@ class Network:
         seller, buyer = self.nodes.get(pu.seller), self.nodes.get(pu.buyer)
         if seller is None or buyer is None:
             return None
+        if offer.kind == "storage":  # lease: the quota follows the on-chain lease
+            if seller.storage_free_kb() < offer.quantity:
+                self.log("core", "rental_failed", purchase_id=purchase_id, reason="seller has no free space")
+                return None
+            self.board.deliver_offer(pu.seller, purchase_id, f"lease:storage:{offer.quantity}")
+            reason = self.put_content({"check": "free space", "kb": offer.quantity}, author="core")
+            self.board.confirm_delivery(pu.buyer, purchase_id, True, reason)
+            self.log("core", "purchase_delivered", purchase_id=purchase_id, offer_id=offer.offer_id,
+                     seller=pu.seller, buyer=pu.buyer, price=pu.price_mP / 1000, verified=True,
+                     kind="storage", quantity=offer.quantity)
+            return None
         if offer.kind != "info":  # quota rental: the gateway moves today's allowance
             try:
                 self.gateway.transfer_quota(offer.kind, pu.seller, pu.buyer, offer.quantity)

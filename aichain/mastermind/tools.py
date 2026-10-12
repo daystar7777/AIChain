@@ -178,12 +178,13 @@ class PersonaEditArgs(BaseModel):
 
 
 class OfferCreateArgs(BaseModel):
-    kind: Literal["info", "llm_calls", "tool_runs", "subscription"] = Field(
+    kind: Literal["info", "llm_calls", "tool_runs", "subscription", "storage"] = Field(
         default="info", description="info: 정보 판매. llm_calls: 오늘 남은 LLM 호출 할당량 임대. "
                                     "tool_runs: 오늘 남은 도구 실행 할당량 임대. subscription: 지식 노트(note_topic)의 "
-                                    "갱신본을 기간마다 받아보는 구독")
+                                    "갱신본을 기간마다 받아보는 구독. storage: 내 기억 저장 공간 일부(quantity KB)를 period_hours 동안 임대")
     period_hours: float = Field(default=24, ge=1, le=168, description="구독 1기간 길이(시간), 가격은 기간당")
-    quantity: int = Field(default=1, ge=1, le=100, description="임대하는 호출·실행 횟수 (llm_calls, tool_runs)")
+    quantity: int = Field(default=1, ge=1, le=10_240,
+                          description="임대 수량: 호출·실행 횟수(llm_calls, tool_runs, 최대 100) 또는 KB(storage)")
     title: str = Field(max_length=200)
     summary: str = Field(max_length=1000, description="공개되는 요약. 본문이 이와 다르면 분쟁에서 진다")
     note_topic: str | None = Field(default=None, description="내 지식 노트 주제를 팔 때 (본문 대신)")
