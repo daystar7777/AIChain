@@ -22,6 +22,7 @@ ALLOWED_MODULES = {
     "json", "math", "re", "statistics", "datetime", "decimal", "fractions", "itertools",
     "functools", "collections", "string", "textwrap", "unicodedata", "hashlib", "base64",
     "random", "heapq", "bisect", "dataclasses", "typing", "enum", "operator", "copy",
+    "difflib", "csv", "ast", "html", "calendar", "textwrap", "zlib", "binascii",
     # 05 doc allowlist packages (import names)
     "jsonschema", "numpy", "pandas", "sympy", "bs4", "yaml", "dateutil", "regex",
 }

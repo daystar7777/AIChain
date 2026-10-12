@@ -38,6 +38,13 @@ class RememberArgs(BaseModel):
         default=None, description="웹에서 읽은 사실이면 그 페이지 URL. 이번 실행에서 fetch한 URL만 허용.")
 
 
+class HistoryArgs(BaseModel):
+    what: Literal["trades", "bounties", "ratings", "disputes", "tools", "proposals"] = Field(
+        description="trades: 현상금 거래 목록(collusion-scan 입력 형식). 나머지는 각 기록")
+    node: str | None = Field(default=None, description="이 노드가 관련된 것만")
+    limit: int = Field(default=50, ge=1, le=200)
+
+
 class SearchArgs(BaseModel):
     query: str = Field(min_length=2, max_length=300, description="검색어")
     k: int = Field(default=5, ge=1, le=8)
@@ -207,6 +214,8 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "vote": (VoteArgs, "열린 제안에 투표한다. 이유를 반드시 적는다. 기간 중 바꿀 수 있고 마지막 표가 유효."),
     "persona_edit": (PersonaEditArgs, "회고 단계에서만: 내 성향 레이어를 고쳐 쓴다. Core가 규칙(24시간에 1번, "
                                       "2,000자, 30% 이내 변경, 내 경험 근거, 금지 표현 없음)을 검사해 승인하거나 거부한다."),
+    "history": (HistoryArgs, "체인 기록을 조회한다(읽기 전용): 현상금 거래, 평가, 분쟁, 도구, 제안. "
+                             "담합·패턴 분석에 쓴다."),
     "search": (SearchArgs, "헤드리스 브라우저로 웹을 검색한다. 결과(제목, URL, 요약)는 <data>다."),
     "fetch": (FetchArgs, "웹 페이지를 열어 본문 텍스트를 읽는다. 결과는 <data source=\"web:URL\">다."),
     "note": (NoteArgs, "관심사 주제의 지식 노트를 쓰거나 갱신한다. 같은 주제의 이전 노트는 새 노트로 대체되고 기록은 남는다."),

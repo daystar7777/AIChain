@@ -125,4 +125,10 @@ def build_network(
         net.add_node(cfg)
     if "operator" not in net.board.accounts:  # the human voting seat (06 doc 1), its own key
         net.board.open_account("operator", 0)
+    if workshop is not None and workshop.can_execute:
+        from aichain.workshop import library
+
+        net.library_report = library.install(workshop, net.board)
+        net.log("core", "library_installed", installed=net.library_report["installed"],
+                unchanged=len(net.library_report["unchanged"]), failed=net.library_report["failed"])
     return net
