@@ -153,6 +153,31 @@ class Network:
                               [c_hash], data={"offer_id": offer.offer_id, "purchase_id": purchase_id})
         return opened
 
+    def deliver_subscription(self, sub_id: str) -> str | None:
+        """Core: send the seller's current note on the subscribed topic, sealed to the subscriber."""
+        from aichain.chain.crypto import seal_for
+
+        sub = self.board.subscriptions[sub_id]
+        seller, buyer = self.nodes.get(sub.seller), self.nodes.get(sub.subscriber)
+        if seller is None or buyer is None or sub.state != "ACTIVE":
+            return None
+        topic = seller.private.get(f"sub_topic:{sub.offer_id}")
+        note = seller.memory.latest_note(topic) if topic else None
+        if note is None or not note.data:
+            return None
+        text = json.dumps({"topic": note.topic, "version_seq": note.seq, **note.data}, ensure_ascii=False, indent=1)
+        box = seal_for(self.board.account(sub.subscriber).pubkey, text.encode())
+        c_hash = self.put_content({"sealed_for": sub.subscriber, "box": box}, author=sub.seller)
+        self.board.sub_deliver(sub.seller, sub_id, c_hash)
+        opened = self.keys.open_sealed(sub.subscriber, box).decode()
+        buyer.memory.remember(self.board.height, "fact", f"deal:{sub.seller}",
+                              round(self.reputation(sub.seller).value, 3),
+                              f"[구독 {topic}] {opened[:1500]}", ["deal", "subscription", topic[:40]], [c_hash],
+                              data={"sub_id": sub_id})
+        self.log("core", "subscription_delivered", sub_id=sub_id, seller=sub.seller,
+                 subscriber=sub.subscriber, topic=topic)
+        return opened
+
     def announce_tool_request(self, request_id: str) -> None:
         req = self.board.tool_requests[request_id]
         for node in self.nodes.values():

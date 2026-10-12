@@ -302,6 +302,9 @@ def network_snapshot(net: Any) -> dict[str, Any]:
         "offers": [{"offer_id": o.offer_id, "seller": o.seller, "title": o.title, "state": o.state,
                     "price": fmt_P(o.price_mP), "sold": o.sold, "kind": o.kind, "quantity": o.quantity}
                    for o in board.offers.values()],
+        "subscriptions": [{"sub_id": x.sub_id, "seller": x.seller, "subscriber": x.subscriber, "state": x.state,
+                           "price": fmt_P(x.price_mP), "deliveries": x.deliveries, "paid": x.periods_paid,
+                           "refunded": x.periods_refunded} for x in board.subscriptions.values()],
         "quotas": {n: {"llm_calls": net.gateway.remaining(n, "llm_calls"),
                        "tool_runs": net.gateway.remaining(n, "tool_runs")} for n in net.nodes},
         "tools": [{"tool_id": t.tool_id, "version": t.version, "author": t.author,

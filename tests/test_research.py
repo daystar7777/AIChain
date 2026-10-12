@@ -216,7 +216,7 @@ def test_web_tools_hidden_without_gateway_or_when_conserving(tmp_path):
     n1 = net.nodes["n1"]
     assert {"search", "fetch", "note"} <= set(n1.tool_names())
     n1.bucket.charge(n1.bucket.capacity * 0.8)
-    assert not {"search", "fetch", "note"} & set(n1.tool_names())
+    assert not {"search", "fetch"} & set(n1.tool_names()) and "note" in n1.tool_names()
     plain = build_network("scripted")
     assert "search" not in plain.nodes["n1"].tool_names()
 

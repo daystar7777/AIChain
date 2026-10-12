@@ -184,7 +184,7 @@ class ToolRequest:
 
 
 # info: sealed content (many buyers). llm_calls / tool_runs: a lot of today's quota (one buyer).
-OFFER_KINDS = {"info", "llm_calls", "tool_runs"}
+OFFER_KINDS = {"info", "llm_calls", "tool_runs", "subscription"}
 
 
 @dataclass
@@ -203,6 +203,7 @@ class Offer:
     state: str = "OPEN"  # OPEN | WITHDRAWN | EXPIRED | SOLD (resource lots sell once)
     sold: int = 0
     quantity: int = 1  # resource offers: calls or runs in the lot
+    period_blocks: int = 0  # subscription: length of one paid period
 
 
 @dataclass
@@ -217,6 +218,24 @@ class Purchase:
     state: str = "PENDING"  # PENDING DELIVERED COMPLETED REFUNDED DISPUTED
     ciphertext_hash: str | None = None
     released_height: int | None = None
+
+
+@dataclass
+class Subscription:
+    """Recurring delivery (구독): one period is escrowed at a time; at the period's end the seller is
+    paid if it delivered at least once in it, otherwise the period is refunded; then it renews."""
+    sub_id: str
+    offer_id: str
+    subscriber: str
+    seller: str
+    price_mP: int
+    period_blocks: int
+    period_start: int
+    state: str = "ACTIVE"  # ACTIVE | ENDED
+    delivered_this_period: int = 0
+    periods_paid: int = 0
+    periods_refunded: int = 0
+    deliveries: int = 0
 
 
 @dataclass
@@ -287,6 +306,7 @@ class Board:
         self.tool_requests: dict[str, ToolRequest] = {}
         self.offers: dict[str, Offer] = {}
         self.purchases: dict[str, Purchase] = {}
+        self.subscriptions: dict[str, Subscription] = {}
         self.ratings: dict[str, Rating] = {}
         self.licenses: set[tuple[str, str, int]] = set()  # (account, tool_id, version)
 
@@ -329,6 +349,7 @@ class Board:
             "tool_requests": {k: asdict(v) for k, v in sorted(self.tool_requests.items())},
             "offers": {k: asdict(v) for k, v in sorted(self.offers.items())},
             "purchases": {k: asdict(v) for k, v in sorted(self.purchases.items())},
+            "subscriptions": {k: asdict(v) for k, v in sorted(self.subscriptions.items())},
         }
         return sha256_hex(canonical_json(state))
 
@@ -827,14 +848,17 @@ class Board:
 
     @transaction
     def create_offer(self, seller: str, kind: str, title: str, terms_hash: str, price_mP: int,
-                     content_commit: str | None, expires_blocks: int, quantity: int = 1) -> Offer:
+                     content_commit: str | None, expires_blocks: int, quantity: int = 1,
+                     period_blocks: int = 0) -> Offer:
         self.account(seller)
         if kind not in OFFER_KINDS:
             raise BoardError(f"offer kind must be one of {sorted(OFFER_KINDS)}")
         if kind == "info" and not content_commit:
             raise BoardError("an info offer needs a content commitment")
-        if kind != "info" and not 1 <= quantity <= 100:
+        if kind in ("llm_calls", "tool_runs") and not 1 <= quantity <= 100:
             raise BoardError("resource lots hold 1..100 units")
+        if kind == "subscription" and not 720 <= period_blocks <= 17_280 * 7:
+            raise BoardError("a subscription period is between 1 hour and 7 days")
         if not 0 < price_mP <= 100_000:
             raise BoardError("price must be 1mP..100P")
         if not 720 <= expires_blocks <= 17_280 * 30:
@@ -843,7 +867,8 @@ class Board:
             raise BoardError("at most 20 open offers per account")
         o = Offer(self._new_id("o_", seller, title), seller, kind, title[:200], terms_hash, price_mP,
                   content_commit, self.height, self.height + expires_blocks,
-                  quantity=quantity if kind != "info" else 1)
+                  quantity=quantity if kind in ("llm_calls", "tool_runs") else 1,
+                  period_blocks=period_blocks if kind == "subscription" else 0)
         self.offers[o.offer_id] = o
         return o
 
@@ -861,6 +886,8 @@ class Board:
             raise BoardError("no open offer with that id")
         if buyer == o.seller:
             raise BoardError("cannot buy your own offer")
+        if o.kind == "subscription":
+            raise BoardError("use subscribe for subscription offers")
         if any(p.offer_id == offer_id and p.buyer == buyer and p.state not in ("REFUNDED",)
                for p in self.purchases.values()):
             raise BoardError("already bought")
@@ -900,6 +927,52 @@ class Board:
                         p.seller, self.height, self.height + self.params.dispute_resolve_blocks)
             self.disputes[d.dispute_id] = d
         return p
+
+    # ---- subscriptions ----
+
+    @transaction
+    def subscribe(self, subscriber: str, offer_id: str) -> Subscription:
+        o = self.offers.get(offer_id)
+        if o is None or o.state != "OPEN" or o.kind != "subscription":
+            raise BoardError("no open subscription offer with that id")
+        if subscriber == o.seller:
+            raise BoardError("cannot subscribe to yourself")
+        if any(x.offer_id == offer_id and x.subscriber == subscriber and x.state == "ACTIVE"
+               for x in self.subscriptions.values()):
+            raise BoardError("already subscribed")
+        self._debit_to_escrow(self.account(subscriber), o.price_mP)
+        sub = Subscription(self._new_id("sb_", subscriber, offer_id), offer_id, subscriber, o.seller,
+                           o.price_mP, o.period_blocks, self.height)
+        self.subscriptions[sub.sub_id] = sub
+        return sub
+
+    @transaction
+    def sub_deliver(self, seller: str, sub_id: str, ciphertext_hash: str) -> None:
+        sub = self.subscriptions.get(sub_id)
+        if sub is None or sub.seller != seller or sub.state != "ACTIVE":
+            raise BoardError("no active subscription of yours with that id")
+        sub.delivered_this_period += 1
+        sub.deliveries += 1
+
+    @transaction
+    def cancel_subscription(self, subscriber: str, sub_id: str) -> Subscription:
+        sub = self.subscriptions.get(sub_id)
+        if sub is None or sub.subscriber != subscriber or sub.state != "ACTIVE":
+            raise BoardError("no active subscription of yours with that id")
+        self._close_period(sub)
+        sub.state = "ENDED"
+        return sub
+
+    def _close_period(self, sub: Subscription) -> None:
+        if sub.delivered_this_period > 0:
+            self._pay_from_escrow(sub.seller, sub.price_mP, lock=True)
+            sub.periods_paid += 1
+            self._rep(sub.seller, "info_sold", offer_id=sub.offer_id, value_mP=sub.price_mP,
+                      offer_kind="subscription")
+        else:
+            self._pay_from_escrow(sub.subscriber, sub.price_mP, lock=False)
+            sub.periods_refunded += 1
+        sub.delivered_this_period = 0
 
     # ---- tool buy orders ----
 
@@ -1017,6 +1090,18 @@ class Board:
                 pu.state = "REFUNDED"
                 self._pay_from_escrow(pu.buyer, pu.price_mP, lock=False)
                 events.append(BoardEvent("purchase_refunded", None, {"purchase_id": pu.purchase_id}))
+        for sub in self.subscriptions.values():
+            if sub.state == "ACTIVE" and h >= sub.period_start + sub.period_blocks:
+                self._close_period(sub)
+                offer = self.offers[sub.offer_id]
+                if offer.state == "OPEN" and self.account(sub.subscriber).available_mP >= sub.price_mP:
+                    self._debit_to_escrow(self.account(sub.subscriber), sub.price_mP)
+                    sub.period_start = h
+                else:
+                    sub.state = "ENDED"
+                events.append(BoardEvent("subscription_period", None, {
+                    "sub_id": sub.sub_id, "state": sub.state, "paid": sub.periods_paid,
+                    "refunded": sub.periods_refunded}))
         for req in self.tool_requests.values():
             if req.state == "OPEN" and h >= req.deadline:
                 req.state = "EXPIRED"

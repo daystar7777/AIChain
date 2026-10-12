@@ -55,6 +55,7 @@ from aichain.mastermind.tools import (
     OfferCreateArgs,
     OffersArgs,
     OfferWithdrawArgs,
+    SubscriptionsArgs,
     RecallArgs,
     RememberArgs,
     SearchArgs,
@@ -756,6 +757,22 @@ class Node:
             self.net.log(self.id, "rated", subject=args.subject, score=args.score,
                          context_ref=args.context_ref, comment=args.comment[:200])
             return f"{args.subject}를 {args.score:+d}로 평가함 ({r.rating_id})"
+        if isinstance(args, OfferCreateArgs) and args.kind == "subscription":
+            if not args.note_topic or self.memory.latest_note(args.note_topic) is None:
+                raise BoardError("구독은 내 지식 노트 주제(note_topic)로만 판다")
+            terms_hash = self.net.put_content({"title": args.title, "summary": args.summary, "kind": "subscription",
+                                               "topic": args.note_topic, "period_hours": args.period_hours},
+                                              author=self.id)
+            offer = board.create_offer(self.id, "subscription", args.title, terms_hash, to_mP(args.price_P), None,
+                                       round(args.expires_hours * 720), period_blocks=round(args.period_hours * 720))
+            self.private[f"sub_topic:{offer.offer_id}"] = args.note_topic
+            if self.net.chain is not None:
+                self.net.chain.put_private(self.id, f"sub_topic:{offer.offer_id}", args.note_topic)
+            self.policy.record_write(0, h)
+            self.net.log(self.id, "offer_created", offer_id=offer.offer_id, title=offer.title,
+                         price=fmt_P(offer.price_mP), kind="subscription", quantity=1, chars=0)
+            return (f"구독 상품 {offer.offer_id}: '{args.note_topic}' 노트 갱신본, {args.period_hours:g}시간마다 "
+                    f"{fmt_P(offer.price_mP)}")
         if isinstance(args, OfferCreateArgs) and args.kind != "info":
             left = self.net.gateway.remaining(self.id, args.kind)
             if left is not None and left < args.quantity:
@@ -803,7 +820,8 @@ class Node:
                     continue
                 mine = any(pu.offer_id == o.offer_id and pu.buyer == self.id and pu.state != "REFUNDED"
                            for pu in board.purchases.values())
-                what_ = "정보" if o.kind == "info" else f"{o.kind} {o.quantity}개"
+                what_ = ("정보" if o.kind == "info" else f"구독 {o.period_blocks / 720:g}시간마다"
+                         if o.kind == "subscription" else f"{o.kind} {o.quantity}개")
                 rows.append(f"- {o.offer_id}{'(구매함)' if mine else ''} [{what_}]: {o.title} | {fmt_P(o.price_mP)} | "
                             f"판매자 {o.seller} 평판 {self.net.reputation(o.seller).value:.2f} | 판매 {o.sold} | "
                             f"요약: {terms.get('summary', '')[:200]}")
@@ -813,6 +831,16 @@ class Node:
             if offer is None:
                 raise BoardError("unknown offer")
             self.policy.check_spend(offer.price_mP, acct.available_mP, h, bounty=False)
+            if offer.kind == "subscription":
+                sub = board.subscribe(self.id, args.offer_id)
+                self.policy.record_write(offer.price_mP, h)
+                first = self.net.deliver_subscription(sub.sub_id)
+                head = (f"구독 시작 {sub.sub_id}: 기간당 {fmt_P(sub.price_mP)}, 기간마다 전달이 있으면 결제되고 "
+                        f"없으면 환불된다. 해지는 subscriptions(cancel=...).")
+                if first is None:
+                    return head
+                return Prewrapped(data_block("core", head) + "\n" + data_block(
+                    f"deal:{offer.seller}", first[:8000], trust=self.net.reputation(offer.seller).value))
             if offer.kind != "info":
                 left = self.net.gateway.remaining(offer.seller, offer.kind)
                 if left is not None and left < offer.quantity:
@@ -828,6 +856,16 @@ class Node:
             return Prewrapped(data_block(f"deal:{offer.seller}", plaintext[:8000],
                                          trust=self.net.reputation(offer.seller).value,
                                          purchase=pu.purchase_id))
+        if isinstance(args, SubscriptionsArgs):
+            if args.cancel:
+                sub = board.cancel_subscription(self.id, args.cancel)
+                self.policy.record_write(0, h)
+                return f"{sub.sub_id} 해지: 결제 {sub.periods_paid}기간, 환불 {sub.periods_refunded}기간"
+            rows = [f"- {x.sub_id} [{x.state}] {'구독' if x.subscriber == self.id else '구독자 ' + x.subscriber}: "
+                    f"{board.offers[x.offer_id].title} | {fmt_P(x.price_mP)}/기간 | 전달 {x.deliveries} | "
+                    f"결제 {x.periods_paid} 환불 {x.periods_refunded}"
+                    for x in board.subscriptions.values() if self.id in (x.subscriber, x.seller)]
+            return "\n".join(rows) or "(구독 없음)"
         if isinstance(args, OfferWithdrawArgs):
             board.withdraw_offer(self.id, args.offer_id)
             self.policy.record_write(0, h)
@@ -925,6 +963,10 @@ class Node:
                                        sorted(set(hashes)), supersedes=prev.hash if prev else None,
                                        topic=args.topic, data=data)
             version = sum(1 for r in self.memory.records if r.kind == "note" and r.topic == args.topic)
+            for sub in board.subscriptions.values():  # Core: push the new version to subscribers
+                if (sub.seller == self.id and sub.state == "ACTIVE"
+                        and self.private.get(f"sub_topic:{sub.offer_id}") == args.topic):
+                    self.net.deliver_subscription(sub.sub_id)
             self.net.log(self.id, "knowledge", topic=args.topic, version=version,
                          facts=len(args.facts), confidence=args.confidence,
                          supersedes=prev.seq if prev else None, seq=rec.seq)

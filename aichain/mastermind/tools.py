@@ -178,9 +178,11 @@ class PersonaEditArgs(BaseModel):
 
 
 class OfferCreateArgs(BaseModel):
-    kind: Literal["info", "llm_calls", "tool_runs"] = Field(
+    kind: Literal["info", "llm_calls", "tool_runs", "subscription"] = Field(
         default="info", description="info: 정보 판매. llm_calls: 오늘 남은 LLM 호출 할당량 임대. "
-                                    "tool_runs: 오늘 남은 도구 실행 할당량 임대")
+                                    "tool_runs: 오늘 남은 도구 실행 할당량 임대. subscription: 지식 노트(note_topic)의 "
+                                    "갱신본을 기간마다 받아보는 구독")
+    period_hours: float = Field(default=24, ge=1, le=168, description="구독 1기간 길이(시간), 가격은 기간당")
     quantity: int = Field(default=1, ge=1, le=100, description="임대하는 호출·실행 횟수 (llm_calls, tool_runs)")
     title: str = Field(max_length=200)
     summary: str = Field(max_length=1000, description="공개되는 요약. 본문이 이와 다르면 분쟁에서 진다")
@@ -196,6 +198,10 @@ class OffersArgs(BaseModel):
 
 class OfferBuyArgs(BaseModel):
     offer_id: str
+
+
+class SubscriptionsArgs(BaseModel):
+    cancel: str | None = Field(default=None, description="해지할 sub_id (비우면 내 구독·구독자 목록)")
 
 
 class OfferWithdrawArgs(BaseModel):
@@ -278,6 +284,8 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "offers": (OffersArgs, "판매 중인 정보·할당량 목록: 종류, 제목, 요약, 수량, 가격, 판매 수, 판매자 평판."),
     "offer_buy": (OfferBuyArgs, "정보를 산다. 대금은 에스크로를 거쳐 판매자에게 가고, 본문이 바로 복호화되어 내 기억에 저장된다. "
                                 "요약과 다르면 분쟁 기간 안에 dispute(target_kind='deal')."),
+    "subscriptions": (SubscriptionsArgs, "내 구독과 내 구독자 목록을 보거나, cancel로 구독을 해지한다. 기간 중 전달이 "
+                                         "없었으면 그 기간 요금은 환불된다."),
     "offer_withdraw": (OfferWithdrawArgs, "내 판매 등록을 내린다(이미 판 것은 유지)."),
     "tool_request": (ToolRequestArgs, "도구 구매 요청을 낸다: 필요한 도구의 설명·합격 테스트·보상을 걸면, 다른 노드가 만들어 "
                                       "제출하고 테스트를 처음 통과한 도구가 보상을 받는다. 나는 그 도구 라이선스를 얻는다."),
@@ -290,13 +298,13 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "done": (DoneArgs, "에피소드를 끝낸다."),
 }
 
-WEB_TOOLS = {"search", "fetch", "note"}
+WEB_TOOLS = {"search", "fetch"}  # note is always available (knowledge can come from purchases too)
 WORKSHOP_TOOLS = {"tool_dev", "tool_list", "tool_activate", "tool_run", "tool_publish",
                   "tool_market", "tool_license", "tool_request", "tool_requests", "tool_submit"}
 
 WRITE_TOOLS = {"ask", "answer", "judge", "tool_publish", "tool_license", "dispute", "rate",
                "propose", "vote", "tool_request", "tool_submit", "offer_create", "offer_buy",
-               "offer_withdraw"}
+               "offer_withdraw", "subscriptions"}
 
 
 def _inline(schema: dict[str, Any]) -> dict[str, Any]:
