@@ -17,7 +17,7 @@ from typing import Any
 E6 = 1_000_000
 HALF_LIFE_BLOCKS = 120_960  # 7 days
 # Reputation events that carry confirmed income (value_mP): reputation V, issuance, metrics.
-INCOME_KINDS = ("answer_accepted", "answer_auto", "tool_licensed", "tool_called", "info_sold")
+INCOME_KINDS = ("answer_accepted", "answer_auto", "tool_licensed", "tool_called", "info_sold", "loan_interest")
 EPOCH_BLOCKS = 720
 WEIGHTS_E6 = {"A": 300_000, "V": 150_000, "J": 150_000, "T": 100_000, "W": 100_000,
               "U": 100_000, "S": 100_000}
@@ -91,8 +91,10 @@ def compute(events: list[dict[str, Any]], account: str, height: int,
     terms = {
         "A": _ratio_e6(acc + auto // 2 + E6, acc + auto + rej + 3 * lost_ans + 2 * E6),
         "V": min(E6, log10_e6(E6 + income_mP * 1000) // 3),  # income in P: mP * 1000 = P in e6
-        "J": E6 - _ratio_e6(w.get("judge_timeout", 0) + w.get("dispute_lost_rejection", 0),
-                            bounties_created * E6 + 2 * E6),
+        # J: reliability as a counterparty: judging on time, fair rejections, repaying loans.
+        "J": E6 - _ratio_e6(w.get("judge_timeout", 0) + w.get("dispute_lost_rejection", 0)
+                            + 2 * w.get("loan_default", 0),
+                            bounties_created * E6 + w.get("loan_repaid", 0) + w.get("loan_default", 0) + 2 * E6),
         # T: tools sold (licenses), penalised by lost tool disputes; neutral without tools.
         "T": (_ratio_e6(E6 + w.get("tool_licensed", 0),
                         2 * E6 + w.get("tool_licensed", 0) + 3 * w.get("dispute_lost_tool", 0))

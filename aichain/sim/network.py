@@ -178,6 +178,21 @@ class Network:
                  subscriber=sub.subscriber, topic=topic)
         return opened
 
+    def announce_loan(self, loan_id: str) -> None:
+        loan = self.board.loans[loan_id]
+        for node in self.nodes.values():
+            if node.id != loan.borrower and self.gateway.has_daily_room(node.id):
+                node.enqueue("loan_request_new", {"loan_id": loan_id})
+
+    def notify_loan(self, loan_id: str) -> None:
+        loan = self.board.loans[loan_id]
+        text = (f"대출 {loan_id}: 차입자 {loan.borrower}, 대여자 {loan.lender}, 원금 {loan.principal_mP / 1000:g}P, "
+                f"이자 {loan.interest_mP / 1000:g}P, 상태 {loan.state}" + (f", 만기 #{loan.due}" if loan.due else ""))
+        for nid in (loan.borrower, loan.lender):
+            if nid in self.nodes:
+                self.nodes[nid].memory.remember(self.board.height, "episode", f"chain:{loan_id}", 1.0, text,
+                                                tags=["loan"])
+
     def announce_tool_request(self, request_id: str) -> None:
         req = self.board.tool_requests[request_id]
         for node in self.nodes.values():
@@ -278,6 +293,8 @@ class Network:
                             self.board.height, "episode", f"chain:{prop.proposal_id}", 1.0,
                             f"제안 {prop.proposal_id} '{prop.title}' → {prop.state} {prop.tally or ''}",
                             tags=["governance"])
+            elif ev.kind == "loan_settled":
+                self.notify_loan(ev.payload["loan_id"])
             elif ev.kind == "tool_request_expired":
                 req = self.board.tool_requests[ev.payload["request_id"]]
                 if req.buyer in self.nodes:

@@ -156,6 +156,7 @@ const KIND = {
   persona_edit: ["성향 수정", "warn"], persona_rollback: ["성향 롤백", "bad"],
   tool_request_created: ["도구 구매 요청", "warn"], tool_submission_verified: ["도구 제출 검증", ""],
   library_installed: ["표준 도구 설치", "ok"], offer_created: ["정보 판매 등록", "warn"],
+  loan_requested: ["대출 요청", "warn"], loan_funded: ["대출 실행", "ok"], loan_settled: ["대출 만기", "warn"],
   purchase_delivered: ["정보 거래", "ok"], subscription_delivered: ["구독 전달", "ok"], subscription_period: ["구독 정산", ""], purchase_refunded: ["구매 환불", "warn"],
   proposal_created: ["제안", "warn"], voted: ["투표", ""], proposal_vetoed: ["거부권", "bad"],
   proposal_tallied: ["개표", "warn"], proposal_approved: ["제안 적용", "ok"], epoch_issued: ["발행", "ok"],
@@ -222,6 +223,9 @@ function describe(e) {
     case "tool_submission_verified": return `${esc(d.tool_id)} v${d.version} → <b>${d.passed ? "합격" : "불합격"}</b> (${esc(d.request_id)} ${esc(d.state)})`;
     case "subscription_delivered": return `${esc(d.seller)} → ${esc(d.subscriber)} '${esc(d.topic)}' (암호화)`;
     case "subscription_period": return `${esc(d.sub_id)} ${esc(d.state)} · 결제 ${d.paid} · 환불 ${d.refunded}`;
+    case "loan_requested": return `원금 ${esc(d.principal)} · 이자 ${esc(d.interest)} · 담보 ${esc(d.collateral)} · ${d.term_blocks}블록`;
+    case "loan_funded": return `${esc(d.borrower)}에게 ${esc(d.principal)} · 만기 #${d.due}`;
+    case "loan_settled": return `${esc(d.loan_id)} <b>${esc(d.state)}</b> (${esc(d.borrower)} ← ${esc(d.lender)})`;
     case "offer_created": return `'${esc(d.title)}' ${esc(d.price)} · ${d.chars}자`;
     case "purchase_delivered": return `${esc(d.seller)} → ${esc(d.buyer)} · ${d.price}P · ${d.verified ? "암호화 전달·검증 OK" : "<b>검증 실패 → 운영자 판정</b>"}`;
     case "library_installed": return `설치 ${(d.installed || []).length} · 유지 ${d.unchanged} · 실패 ${(d.failed || []).length}`;
@@ -342,12 +346,13 @@ function renderMarket(s) {
   const of = (s.offers || []).filter(o => o.state === "OPEN" || o.sold).slice().reverse().map(o => `<div class="answer">
     판매${o.kind && o.kind !== "info" ? ` (${esc(o.kind)} ×${o.quantity})` : ""}: <b>${esc(o.title)}</b> · ${esc(o.seller)} · ${esc(o.price)} · 판매 ${o.sold} <span class="chip">${esc(o.state)}</span></div>`).join("");
   const sb = (s.subscriptions || []).map(x => `<div class="answer">구독: ${esc(x.subscriber)} ← ${esc(x.seller)} · ${esc(x.price)}/기간 · 전달 ${x.deliveries} · 결제 ${x.paid} · 환불 ${x.refunded} <span class="chip">${esc(x.state)}</span></div>`).join("");
+  const ln = (s.loans || []).slice().reverse().map(x => `<div class="answer ${x.state === "DEFAULTED" ? "rejected" : x.state === "REPAID" ? "accepted" : ""}">대출: ${esc(x.borrower)} ← ${esc(x.lender || "-")} · ${esc(x.principal)} + ${esc(x.interest)} · 담보 ${esc(x.collateral)} <span class="chip">${esc(x.state)}</span></div>`).join("");
   const ts = (s.tools || []).filter(t => t.author !== "lib").map(t => `<div class="answer">${esc(t.tool_id)} v${t.version} · ${esc(t.author)}
     · 라이선스 ${esc(t.price_install)} · 호출 ${esc(t.price_call)} · 판매 ${t.sold}${t.withdrawn ? " · 판매중단" : ""}</div>`).join("");
   const ps = (s.proposals || []).slice().reverse().map(x => `<div class="answer ${x.state === "ACTIVATED" ? "accepted" : ["REJECTED", "VETOED"].includes(x.state) ? "rejected" : ""}">
     <b>${esc(x.title)}</b> <span class="chip ${["VOTING", "TIMELOCK"].includes(x.state) ? "warn" : ""}">${esc(x.state)}</span> ${esc(x.kind)} · ${esc(x.proposer)}
     <div class="meta">${esc((x.changes || []).map(c => c.key + " " + c.from + " → " + c.to).join(", ") || "-")} · 투표 ${esc(Object.entries(x.votes || {}).map(([k, v]) => k + ":" + v).join(", ") || "없음")} · 마감 #${x.vote_until}</div></div>`).join("");
-  $("market").innerHTML = (ps ? `<div class="meta">제안</div>${ps}` : "") + (ds ? `<div class="meta">분쟁</div>${ds}` : "") + (of ? `<div class="meta">정보 판매</div>${of}` : "") + (sb ? `<div class="meta">구독</div>${sb}` : "") + (rq ? `<div class="meta">도구 구매 요청</div>${rq}` : "") + (ts ? `<div class="meta">판매 중인 도구</div>${ts}` : "")
+  $("market").innerHTML = (ps ? `<div class="meta">제안</div>${ps}` : "") + (ds ? `<div class="meta">분쟁</div>${ds}` : "") + (of ? `<div class="meta">정보 판매</div>${of}` : "") + (sb ? `<div class="meta">구독</div>${sb}` : "") + (ln ? `<div class="meta">대출</div>${ln}` : "") + (rq ? `<div class="meta">도구 구매 요청</div>${rq}` : "") + (ts ? `<div class="meta">판매 중인 도구</div>${ts}` : "")
     || '<div class="empty">분쟁·도구 없음</div>';
 }
 

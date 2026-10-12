@@ -50,6 +50,8 @@ from aichain.mastermind.tools import (
     GetStateArgs,
     HistoryArgs,
     JudgeArgs,
+    LoanRequestArgs,
+    LoansArgs,
     NoteArgs,
     OfferBuyArgs,
     OfferCreateArgs,
@@ -92,6 +94,7 @@ PRIORITY = {
     "bridge_question": 3,
     "review_settled": 3,
     "tool_request_new": 3,
+    "loan_request_new": 4,
     "peer_msg": 4,
     "idle_tick": 5,
     "research_tick": 5,
@@ -403,6 +406,16 @@ class Node:
                                   trust=self.net.reputation(req.buyer).value))
             attrs = (f'request_id="{req.request_id}" buyer="{req.buyer}" reward="{fmt_P(req.reward_mP)}" '
                      f'deadline="{req.deadline}"')
+        elif ev.kind == "loan_request_new":
+            loan = board.loans[p["loan_id"]]
+            purpose = (self.net.content.get(loan.terms_hash) or {}).get("purpose", "")
+            inner = ("다른 노드가 포인트를 빌려 달라고 한다. 빌려주면 원금이 바로 나가고, 만기에 원금+이자를 받는다. "
+                     "차입자가 못 갚으면 담보만 받는다. 차입자의 평판·상환 이력(loans)과 내 잔액을 보고 판단한다. "
+                     "빌려줄 때만 loans(action='fund').\n"
+                     f"원금 {fmt_P(loan.principal_mP)}, 이자 {fmt_P(loan.interest_mP)}, 담보 {fmt_P(loan.collateral_mP)}, "
+                     f"기간 {loan.term_blocks}블록, 차입자 {loan.borrower} 평판 {self.net.reputation(loan.borrower).value:.2f}\n"
+                     + data_block(f"peer:{loan.borrower}", purpose, trust=self.net.reputation(loan.borrower).value))
+            attrs = f'loan_id="{loan.loan_id}" borrower="{loan.borrower}"'
         elif ev.kind == "review_settled":
             b = board.bounty(p["bounty_id"])
             q = self.net.content.get(b.question_hash)
@@ -866,6 +879,57 @@ class Node:
                     f"결제 {x.periods_paid} 환불 {x.periods_refunded}"
                     for x in board.subscriptions.values() if self.id in (x.subscriber, x.seller)]
             return "\n".join(rows) or "(구독 없음)"
+        if isinstance(args, LoanRequestArgs):
+            collateral = to_mP(args.collateral_P)
+            terms_hash = self.net.put_content({"purpose": args.purpose}, author=self.id)
+            loan = board.create_loan_request(self.id, to_mP(args.principal_P),
+                                             to_mP(args.principal_P * args.interest_pct / 100), collateral,
+                                             round(args.term_hours * 720), terms_hash)
+            self.policy.record_write(collateral, h)
+            self.net.log(self.id, "loan_requested", loan_id=loan.loan_id, principal=fmt_P(loan.principal_mP),
+                         interest=fmt_P(loan.interest_mP), collateral=fmt_P(collateral), term_blocks=loan.term_blocks)
+            self.net.announce_loan(loan.loan_id)
+            return (f"대출 요청 {loan.loan_id}: {fmt_P(loan.principal_mP)} (이자 {fmt_P(loan.interest_mP)}, "
+                    f"담보 {fmt_P(collateral)}), 기간 {loan.term_blocks}블록")
+        if isinstance(args, LoansArgs):
+            if args.action == "list":
+                rows = []
+                for x in board.loans.values():
+                    mine = self.id in (x.borrower, x.lender)
+                    if x.state == "REQUESTED" or (mine and x.state == "ACTIVE"):
+                        purpose = (self.net.content.get(x.terms_hash) or {}).get("purpose", "")
+                        rows.append(f"- {x.loan_id} [{x.state}] 차입자 {x.borrower} 평판 "
+                                    f"{self.net.reputation(x.borrower).value:.2f} | 원금 {fmt_P(x.principal_mP)} "
+                                    f"이자 {fmt_P(x.interest_mP)} 담보 {fmt_P(x.collateral_mP)} | 기간 {x.term_blocks}블록"
+                                    + (f" | 만기 #{x.due}" if x.due else "") + f" | 용도: {purpose[:150]}")
+                past = [x for x in board.loans.values() if x.borrower in {r.borrower for r in board.loans.values()}
+                        and x.state in ("REPAID", "DEFAULTED")]
+                summary = ", ".join(f"{b}: 상환 {sum(1 for x in past if x.borrower == b and x.state == 'REPAID')} "
+                                    f"부도 {sum(1 for x in past if x.borrower == b and x.state == 'DEFAULTED')}"
+                                    for b in sorted({x.borrower for x in past}))
+                return Prewrapped(data_block("market", "\n".join(rows) or "(열린 대출 없음)")
+                                  + (f"\n상환 이력: {summary}" if summary else ""))
+            if not args.loan_id:
+                raise BoardError("loan_id가 필요하다")
+            if args.action == "fund":
+                loan = board.loans.get(args.loan_id)
+                if loan is None:
+                    raise BoardError("unknown loan")
+                self.policy.check_spend(loan.principal_mP, acct.available_mP, h, bounty=False)
+                board.fund_loan(self.id, args.loan_id)
+                self.policy.record_write(loan.principal_mP, h)
+                self.net.log(self.id, "loan_funded", loan_id=loan.loan_id, borrower=loan.borrower,
+                             principal=fmt_P(loan.principal_mP), due=loan.due)
+                self.net.notify_loan(loan.loan_id)
+                return f"{loan.loan_id}에 {fmt_P(loan.principal_mP)}을 빌려줬다. 만기 블록 {loan.due}"
+            if args.action == "repay":
+                loan = board.repay_loan(self.id, args.loan_id)
+                self.policy.record_write(0, h)
+                self.net.notify_loan(loan.loan_id)
+                return f"{loan.loan_id} 상환 완료"
+            board.cancel_loan_request(self.id, args.loan_id)
+            self.policy.record_write(0, h)
+            return f"{args.loan_id} 요청 취소, 담보 반환"
         if isinstance(args, OfferWithdrawArgs):
             board.withdraw_offer(self.id, args.offer_id)
             self.policy.record_write(0, h)

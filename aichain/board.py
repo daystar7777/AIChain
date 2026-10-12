@@ -239,6 +239,25 @@ class Subscription:
 
 
 @dataclass
+class Loan:
+    """A point loan (대여·차입). The borrower posts the request (collateral escrowed at once);
+    a lender funds it; at `due` the chain repays automatically if the borrower can, otherwise the
+    loan defaults: collateral goes to the lender and the borrower gets a loan_default event."""
+    loan_id: str
+    borrower: str
+    principal_mP: int
+    interest_mP: int
+    collateral_mP: int
+    term_blocks: int
+    terms_hash: str
+    created_height: int
+    state: str = "REQUESTED"  # REQUESTED ACTIVE REPAID DEFAULTED CANCELLED
+    lender: str | None = None
+    due: int | None = None
+    settled_height: int | None = None
+
+
+@dataclass
 class ToolListing:
     tool_id: str
     version: int
@@ -307,6 +326,7 @@ class Board:
         self.offers: dict[str, Offer] = {}
         self.purchases: dict[str, Purchase] = {}
         self.subscriptions: dict[str, Subscription] = {}
+        self.loans: dict[str, Loan] = {}
         self.ratings: dict[str, Rating] = {}
         self.licenses: set[tuple[str, str, int]] = set()  # (account, tool_id, version)
 
@@ -350,6 +370,7 @@ class Board:
             "offers": {k: asdict(v) for k, v in sorted(self.offers.items())},
             "purchases": {k: asdict(v) for k, v in sorted(self.purchases.items())},
             "subscriptions": {k: asdict(v) for k, v in sorted(self.subscriptions.items())},
+            "loans": {k: asdict(v) for k, v in sorted(self.loans.items())},
         }
         return sha256_hex(canonical_json(state))
 
@@ -974,6 +995,73 @@ class Board:
             sub.periods_refunded += 1
         sub.delivered_this_period = 0
 
+    # ---- loans ----
+
+    @transaction
+    def create_loan_request(self, borrower: str, principal_mP: int, interest_mP: int, collateral_mP: int,
+                            term_blocks: int, terms_hash: str) -> Loan:
+        self.account(borrower)
+        if not 1000 <= principal_mP <= 200_000:
+            raise BoardError("principal must be 1P..200P")
+        if not 0 <= interest_mP <= principal_mP * 3 // 10:
+            raise BoardError("interest must be 0..30% of the principal")
+        if not 720 <= term_blocks <= 17_280 * 7:
+            raise BoardError("term must be 1 hour..7 days")
+        if collateral_mP < 0:
+            raise BoardError("collateral cannot be negative")
+        if sum(1 for x in self.loans.values() if x.borrower == borrower and x.state in ("REQUESTED", "ACTIVE")) >= 3:
+            raise BoardError("at most 3 open loans per borrower")
+        if collateral_mP:
+            self._debit_to_escrow(self.account(borrower), collateral_mP)
+        loan = Loan(self._new_id("l_", borrower, principal_mP), borrower, principal_mP, interest_mP,
+                    collateral_mP, term_blocks, terms_hash, self.height)
+        self.loans[loan.loan_id] = loan
+        return loan
+
+    @transaction
+    def cancel_loan_request(self, borrower: str, loan_id: str) -> None:
+        loan = self.loans.get(loan_id)
+        if loan is None or loan.borrower != borrower or loan.state != "REQUESTED":
+            raise BoardError("no open loan request of yours with that id")
+        loan.state = "CANCELLED"
+        self._pay_from_escrow(borrower, loan.collateral_mP, lock=False)
+
+    @transaction
+    def fund_loan(self, lender: str, loan_id: str) -> Loan:
+        loan = self.loans.get(loan_id)
+        if loan is None or loan.state != "REQUESTED":
+            raise BoardError("no open loan request with that id")
+        if lender == loan.borrower:
+            raise BoardError("cannot lend to yourself")
+        self._transfer(lender, loan.borrower, loan.principal_mP)
+        loan.state, loan.lender, loan.due = "ACTIVE", lender, self.height + loan.term_blocks
+        return loan
+
+    @transaction
+    def repay_loan(self, borrower: str, loan_id: str) -> Loan:
+        loan = self.loans.get(loan_id)
+        if loan is None or loan.borrower != borrower or loan.state != "ACTIVE":
+            raise BoardError("no active loan of yours with that id")
+        self._settle_loan(loan)
+        if loan.state != "REPAID":
+            raise BoardError("not enough available balance to repay")
+        return loan
+
+    def _settle_loan(self, loan: Loan, at_due: bool = False) -> None:
+        owed = loan.principal_mP + loan.interest_mP
+        if self.account(loan.borrower).available_mP >= owed:
+            self._transfer(loan.borrower, loan.lender, owed)
+            self._pay_from_escrow(loan.borrower, loan.collateral_mP, lock=False)
+            loan.state, loan.settled_height = "REPAID", self.height
+            self._rep(loan.borrower, "loan_repaid", loan_id=loan.loan_id)
+            if loan.interest_mP:
+                self._rep(loan.lender, "loan_interest", loan_id=loan.loan_id, value_mP=loan.interest_mP)
+        elif at_due:
+            self._pay_from_escrow(loan.lender, loan.collateral_mP, lock=False)
+            loan.state, loan.settled_height = "DEFAULTED", self.height
+            self._rep(loan.borrower, "loan_default", loan_id=loan.loan_id, owed_mP=owed,
+                      recovered_mP=loan.collateral_mP)
+
     # ---- tool buy orders ----
 
     @transaction
@@ -1090,6 +1178,11 @@ class Board:
                 pu.state = "REFUNDED"
                 self._pay_from_escrow(pu.buyer, pu.price_mP, lock=False)
                 events.append(BoardEvent("purchase_refunded", None, {"purchase_id": pu.purchase_id}))
+        for loan in self.loans.values():
+            if loan.state == "ACTIVE" and h >= loan.due:
+                self._settle_loan(loan, at_due=True)
+                events.append(BoardEvent("loan_settled", None, {"loan_id": loan.loan_id, "state": loan.state,
+                                                                "borrower": loan.borrower, "lender": loan.lender}))
         for sub in self.subscriptions.values():
             if sub.state == "ACTIVE" and h >= sub.period_start + sub.period_blocks:
                 self._close_period(sub)

@@ -64,6 +64,8 @@ def compute(net: Any) -> dict[str, Any]:
         "info_market": {"offers_open": sum(1 for o in board.offers.values() if o.state == "OPEN"),
                         "purchases": sum(1 for p in board.purchases.values() if p.state == "COMPLETED"),
                         "volume_mP": sum(p.price_mP for p in board.purchases.values() if p.state == "COMPLETED")},
+        "loans": {st: sum(1 for x in board.loans.values() if x.state == st)
+                  for st in ("REQUESTED", "ACTIVE", "REPAID", "DEFAULTED")},
         "proposals": {s: sum(1 for p in board.proposals.values() if p.state == s)
                       for s in {p.state for p in board.proposals.values()}},
         "vote_agreement": vote_agreement(list(board.proposals.values())),

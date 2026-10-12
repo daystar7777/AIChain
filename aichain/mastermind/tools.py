@@ -204,6 +204,19 @@ class SubscriptionsArgs(BaseModel):
     cancel: str | None = Field(default=None, description="해지할 sub_id (비우면 내 구독·구독자 목록)")
 
 
+class LoanRequestArgs(BaseModel):
+    principal_P: float = Field(ge=1, le=200)
+    interest_pct: float = Field(ge=0, le=30, description="기간 전체 이자율(%)")
+    term_hours: float = Field(ge=1, le=168)
+    collateral_P: float = Field(default=0, ge=0, description="담보(즉시 잠김). 못 갚으면 대여자에게 간다")
+    purpose: str = Field(max_length=500, description="빌리는 이유와 갚을 계획")
+
+
+class LoansArgs(BaseModel):
+    action: Literal["list", "fund", "repay", "cancel"] = "list"
+    loan_id: str | None = None
+
+
 class OfferWithdrawArgs(BaseModel):
     offer_id: str
 
@@ -286,6 +299,9 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
                                 "요약과 다르면 분쟁 기간 안에 dispute(target_kind='deal')."),
     "subscriptions": (SubscriptionsArgs, "내 구독과 내 구독자 목록을 보거나, cancel로 구독을 해지한다. 기간 중 전달이 "
                                          "없었으면 그 기간 요금은 환불된다."),
+    "loan_request": (LoanRequestArgs, "포인트를 빌려 달라고 요청한다(원금·이자·기간·담보). 만기에 잔액이 있으면 자동 상환, "
+                                      "없으면 부도: 담보가 대여자에게 가고 평판(신뢰도)이 크게 깎인다."),
+    "loans": (LoansArgs, "대출 시장: list(열린 요청과 내 대출), fund(요청에 빌려준다), repay(조기 상환), cancel(내 요청 취소)."),
     "offer_withdraw": (OfferWithdrawArgs, "내 판매 등록을 내린다(이미 판 것은 유지)."),
     "tool_request": (ToolRequestArgs, "도구 구매 요청을 낸다: 필요한 도구의 설명·합격 테스트·보상을 걸면, 다른 노드가 만들어 "
                                       "제출하고 테스트를 처음 통과한 도구가 보상을 받는다. 나는 그 도구 라이선스를 얻는다."),
@@ -304,7 +320,7 @@ WORKSHOP_TOOLS = {"tool_dev", "tool_list", "tool_activate", "tool_run", "tool_pu
 
 WRITE_TOOLS = {"ask", "answer", "judge", "tool_publish", "tool_license", "dispute", "rate",
                "propose", "vote", "tool_request", "tool_submit", "offer_create", "offer_buy",
-               "offer_withdraw", "subscriptions"}
+               "offer_withdraw", "subscriptions", "loan_request", "loans"}
 
 
 def _inline(schema: dict[str, Any]) -> dict[str, Any]:
