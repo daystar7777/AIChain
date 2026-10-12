@@ -11,6 +11,7 @@ import sys
 from typing import Any, Callable, TextIO
 
 from aichain.board import Board, BoardError, BoardEvent, Params
+from aichain.common import sha256_hex
 from aichain.reputation import EPOCH_BLOCKS, Reputation, for_board
 from aichain.content import ContentStore
 from aichain.gateways.llm.base import LLMGateway
@@ -43,7 +44,8 @@ class Network:
         self.board = Board(params)
         self.content = ContentStore()
         self.chain_stats: dict[str, int] | None = None
-        self.keys: KeyStore | None = None
+        # Account keys: signing, and end-to-end encryption of private deliveries.
+        self.keys: KeyStore = KeyStore(None)
         self.content_author: dict[str, str] = {}
         self.nodes: dict[str, Node] = {}
         if chain is not None:
@@ -89,7 +91,7 @@ class Network:
     def add_node(self, cfg: NodeConfig, grant_mP: int = 1_000_000) -> Node:
         node = Node(cfg, self)
         if cfg.node_id not in self.board.accounts:  # already there when the chain was replayed
-            pub = self.keys.pubkey(cfg.node_id) if self.keys is not None else None
+            pub = self.keys.pubkey(cfg.node_id)
             self.board.open_account(cfg.node_id, grant_mP, pub)
         self.nodes[cfg.node_id] = node
         if self.chain is not None:
@@ -102,6 +104,40 @@ class Network:
             if node.id != prop.proposer and node.id in self.board.voters() \
                     and self.gateway.has_daily_room(node.id):
                 node.enqueue("proposal_open", {"proposal_id": proposal_id})
+
+    def complete_purchase(self, purchase_id: str) -> str | None:
+        """Core-to-Core delivery of an info purchase, end-to-end encrypted:
+        seller Core seals the plaintext to the buyer's key -> buyer Core opens it, checks it against
+        the offer's commitment and confirms (or the deal goes to the operator). No LLM involved."""
+        from aichain.chain.crypto import DecryptError, seal_for
+
+        pu = self.board.purchases[purchase_id]
+        offer = self.board.offers[pu.offer_id]
+        seller, buyer = self.nodes.get(pu.seller), self.nodes.get(pu.buyer)
+        if seller is None or buyer is None:
+            return None
+        plaintext = seller.private.get(f"offer:{offer.offer_id}")
+        if plaintext is None:
+            return None  # cannot deliver; the buyer is refunded at the deadline
+        ciphertext = seal_for(self.board.account(pu.buyer).pubkey, plaintext.encode())
+        c_hash = self.put_content({"sealed_for": pu.buyer, "box": ciphertext}, author=pu.seller)
+        self.board.deliver_offer(pu.seller, purchase_id, c_hash)
+        try:
+            opened = self.keys.open_sealed(pu.buyer, ciphertext).decode()
+            ok = sha256_hex(opened) == offer.content_commit
+        except (DecryptError, UnicodeDecodeError):
+            opened, ok = None, False
+        reason = self.put_content({"check": "commitment", "ok": ok}, author=pu.buyer)
+        self.board.confirm_delivery(pu.buyer, purchase_id, ok, reason)
+        self.log("core", "purchase_delivered", purchase_id=purchase_id, offer_id=offer.offer_id,
+                 seller=pu.seller, buyer=pu.buyer, price=pu.price_mP / 1000, verified=ok)
+        if not ok:
+            return None
+        buyer.memory.remember(self.board.height, "fact", f"deal:{pu.seller}",
+                              round(self.reputation(pu.seller).value, 3),
+                              f"[구매 {offer.title}] {opened[:1500]}", ["deal", offer.title[:40]],
+                              [c_hash], data={"offer_id": offer.offer_id, "purchase_id": purchase_id})
+        return opened
 
     def announce_tool_request(self, request_id: str) -> None:
         req = self.board.tool_requests[request_id]

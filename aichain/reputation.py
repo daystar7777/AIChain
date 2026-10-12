@@ -16,6 +16,8 @@ from typing import Any
 
 E6 = 1_000_000
 HALF_LIFE_BLOCKS = 120_960  # 7 days
+# Reputation events that carry confirmed income (value_mP): reputation V, issuance, metrics.
+INCOME_KINDS = ("answer_accepted", "answer_auto", "tool_licensed", "tool_called", "info_sold")
 EPOCH_BLOCKS = 720
 WEIGHTS_E6 = {"A": 300_000, "V": 150_000, "J": 150_000, "T": 100_000, "W": 100_000,
               "U": 100_000, "S": 100_000}
@@ -82,7 +84,7 @@ def compute(events: list[dict[str, Any]], account: str, height: int,
             continue
         weight = decay_e6(height - e["height"])
         w[e["kind"]] = w.get(e["kind"], 0) + weight
-        if e["kind"] in ("answer_accepted", "answer_auto", "tool_licensed", "tool_called"):
+        if e["kind"] in INCOME_KINDS:
             income_mP += e.get("value_mP", 0)
     acc, auto = w.get("answer_accepted", 0), w.get("answer_auto", 0)
     rej, lost_ans = w.get("answer_rejected", 0), w.get("dispute_lost_answer", 0)

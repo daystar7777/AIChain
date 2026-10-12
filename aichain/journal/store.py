@@ -299,6 +299,8 @@ def network_snapshot(net: Any) -> dict[str, Any]:
                            "reward": fmt_P(r.reward_mP), "deadline": r.deadline,
                            "submissions": len(r.submissions), "winner": r.winner}
                           for r in board.tool_requests.values()],
+        "offers": [{"offer_id": o.offer_id, "seller": o.seller, "title": o.title, "state": o.state,
+                    "price": fmt_P(o.price_mP), "sold": o.sold} for o in board.offers.values()],
         "tools": [{"tool_id": t.tool_id, "version": t.version, "author": t.author,
                    "price_install": fmt_P(t.price_install_mP), "price_call": fmt_P(t.price_call_mP),
                    "sold": sum(1 for (_, tid, v) in board.licenses if tid == t.tool_id and v == t.version),

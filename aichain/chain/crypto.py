@@ -11,7 +11,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from nacl.exceptions import BadSignatureError
+import base64
+
+from nacl.exceptions import BadSignatureError, CryptoError
+from nacl.public import SealedBox
 from nacl.signing import SigningKey, VerifyKey
 
 from aichain.common import canonical_json, sha256_hex
@@ -45,14 +48,35 @@ def merkle_root(ids: list[str]) -> str:
     return level[0].hex()
 
 
+def seal_for(pubkey_hex: str, plaintext: bytes) -> str:
+    """End-to-end encryption to an account (X25519 derived from its Ed25519 key). Returns base64."""
+    box = SealedBox(VerifyKey(bytes.fromhex(pubkey_hex)).to_curve25519_public_key())
+    return base64.b64encode(box.encrypt(plaintext)).decode()
+
+
+class DecryptError(Exception):
+    pass
+
+
 class KeyStore:
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path | None) -> None:
+        """directory None: keys live only in memory (tests, networks without a chain)."""
         self.dir = directory
-        directory.mkdir(parents=True, exist_ok=True)
-        os.chmod(directory, 0o700)
+        if directory is not None:
+            directory.mkdir(parents=True, exist_ok=True)
+            os.chmod(directory, 0o700)
         self._keys: dict[str, SigningKey] = {}
 
+    def open_sealed(self, name: str, ciphertext_b64: str) -> bytes:
+        try:
+            box = SealedBox(self.key(name).to_curve25519_private_key())
+            return box.decrypt(base64.b64decode(ciphertext_b64))
+        except (CryptoError, ValueError) as e:
+            raise DecryptError(f"cannot decrypt for {name}") from e
+
     def key(self, name: str) -> SigningKey:
+        if name not in self._keys and self.dir is None:
+            self._keys[name] = SigningKey.generate()
         if name not in self._keys:
             path = self.dir / f"{name}.key"
             if path.exists():

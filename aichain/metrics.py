@@ -9,6 +9,8 @@ from __future__ import annotations
 from itertools import combinations
 from typing import Any
 
+from aichain.reputation import INCOME_KINDS
+
 
 def gini(values: list[int]) -> float:
     """0 = perfectly equal, 1 = one account holds everything."""
@@ -41,8 +43,7 @@ def compute(net: Any) -> dict[str, Any]:
         outcomes[key] = outcomes.get(key, 0) + 1
     income: dict[str, int] = {n: 0 for n in nodes}
     for e in board.rep_events:
-        if e["account"] in income and e["kind"] in ("answer_accepted", "answer_auto", "tool_licensed",
-                                                     "tool_called"):
+        if e["account"] in income and e["kind"] in INCOME_KINDS:
             income[e["account"]] += e.get("value_mP", 0)
     circulating = sum(a.balance_mP for a in board.accounts.values())
     return {
@@ -60,6 +61,9 @@ def compute(net: Any) -> dict[str, Any]:
         "tools": {"listed": len(board.tools), "licenses": len(board.licenses),
                   "requests_open": sum(1 for r in board.tool_requests.values() if r.state == "OPEN"),
                   "requests_fulfilled": sum(1 for r in board.tool_requests.values() if r.state == "FULFILLED")},
+        "info_market": {"offers_open": sum(1 for o in board.offers.values() if o.state == "OPEN"),
+                        "purchases": sum(1 for p in board.purchases.values() if p.state == "COMPLETED"),
+                        "volume_mP": sum(p.price_mP for p in board.purchases.values() if p.state == "COMPLETED")},
         "proposals": {s: sum(1 for p in board.proposals.values() if p.state == s)
                       for s in {p.state for p in board.proposals.values()}},
         "vote_agreement": vote_agreement(list(board.proposals.values())),

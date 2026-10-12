@@ -15,6 +15,7 @@ from enum import StrEnum
 from typing import Any, Callable
 
 from aichain.common import canonical_json, sha256_hex
+from aichain.reputation import INCOME_KINDS
 
 
 class BoardError(Exception):
@@ -183,6 +184,37 @@ class ToolRequest:
 
 
 @dataclass
+class Offer:
+    """A sell offer in the deal market (팔자). kind "info": sealed content sold to many buyers,
+    delivered end-to-end encrypted; `content_commit` = sha256 of the plaintext."""
+    offer_id: str
+    seller: str
+    kind: str
+    title: str
+    terms_hash: str
+    price_mP: int
+    content_commit: str | None
+    created_height: int
+    expires: int
+    state: str = "OPEN"  # OPEN | WITHDRAWN | EXPIRED
+    sold: int = 0
+
+
+@dataclass
+class Purchase:
+    purchase_id: str
+    offer_id: str
+    buyer: str
+    seller: str
+    price_mP: int
+    height: int
+    deliver_until: int
+    state: str = "PENDING"  # PENDING DELIVERED COMPLETED REFUNDED DISPUTED
+    ciphertext_hash: str | None = None
+    released_height: int | None = None
+
+
+@dataclass
 class ToolListing:
     tool_id: str
     version: int
@@ -248,6 +280,8 @@ class Board:
         self.disputes: dict[str, Dispute] = {}
         self.proposals: dict[str, Proposal] = {}
         self.tool_requests: dict[str, ToolRequest] = {}
+        self.offers: dict[str, Offer] = {}
+        self.purchases: dict[str, Purchase] = {}
         self.ratings: dict[str, Rating] = {}
         self.licenses: set[tuple[str, str, int]] = set()  # (account, tool_id, version)
 
@@ -288,6 +322,8 @@ class Board:
             "proposals": {k: asdict(v) for k, v in sorted(self.proposals.items())},
             "params": asdict(self.params),
             "tool_requests": {k: asdict(v) for k, v in sorted(self.tool_requests.items())},
+            "offers": {k: asdict(v) for k, v in sorted(self.offers.items())},
+            "purchases": {k: asdict(v) for k, v in sorted(self.purchases.items())},
         }
         return sha256_hex(canonical_json(state))
 
@@ -496,6 +532,13 @@ class Board:
                 raise BoardError("rejection disputes apply to refunded bounties in their lock period")
             revealed = sum(1 for a in b.answers if self.answers[a].revealed)
             amount, defendant, bounty_id = b.reward_mP // max(revealed, 1), b.asker, b.bounty_id
+        elif target_kind == "deal":
+            pu = self.purchases.get(target_id)
+            if pu is None or pu.buyer != opener:
+                raise BoardError("only the buyer can dispute a purchase")
+            if pu.state != "COMPLETED" or h > (pu.released_height or 0) + p.dispute_blocks:
+                raise BoardError("completed purchases can be disputed during their lock period")
+            amount, defendant, bounty_id = pu.price_mP, pu.seller, None
         elif target_kind == "rating":
             r = self.ratings.get(target_id)
             if r is None or r.void:
@@ -506,7 +549,7 @@ class Board:
                 raise BoardError("rating dispute window has passed")
             amount, defendant, bounty_id = 0, r.rater, None
         else:
-            raise BoardError("target_kind must be answer, rejection or rating")
+            raise BoardError("target_kind must be answer, rejection, rating or deal")
         if any(d.target_id == target_id and d.state == "open" for d in self.disputes.values()):
             raise BoardError("this target already has an open dispute")
         bond = 1000 if target_kind == "rating" else max(1000, amount * p.dispute_bond_bp // 10_000)
@@ -532,6 +575,19 @@ class Board:
         if ruling == "void":
             d.state = "void"
             self._pay_from_escrow(d.opener, d.bond_mP, lock=False)
+            return
+        if d.target_kind == "deal" and self.purchases[d.target_id].state == "DISPUTED":
+            pu = self.purchases[d.target_id]  # automatic dispute: payment still in escrow
+            if ruling == "uphold":
+                d.state, pu.state = "upheld", "REFUNDED"
+                self._pay_from_escrow(pu.buyer, pu.price_mP, lock=False)
+                self._rep(pu.seller, "dispute_lost_deal", dispute_id=d.dispute_id)
+            else:
+                d.state = "rejected" if ruling == "reject" else "void"
+                pu.state, pu.released_height = "COMPLETED", self.height
+                self._pay_from_escrow(pu.seller, pu.price_mP, lock=True)
+                self.offers[pu.offer_id].sold += 1
+                self._rep(pu.seller, "info_sold", offer_id=pu.offer_id, value_mP=pu.price_mP)
             return
         if ruling == "reject":
             d.state = "rejected"
@@ -563,6 +619,12 @@ class Board:
             for e in self.rep_events:  # the rejection no longer counts against the author
                 if e["kind"] == "answer_rejected" and e["account"] == d.opener and e.get("bounty_id") == b.bounty_id:
                     e["kind"] = "answer_rejected_overturned"
+        elif d.target_kind == "deal":
+            pu = self.purchases[d.target_id]
+            taken = self._take_back(pu.seller, pu.price_mP)
+            self.account(pu.buyer).balance_mP += taken
+            pu.state = "REFUNDED"
+            self._rep(pu.seller, "dispute_lost_deal", dispute_id=d.dispute_id)
         elif d.target_kind == "rating":
             self.ratings[d.target_id].void = True
             for e in self.rep_events:
@@ -756,6 +818,75 @@ class Board:
         self._rep(listing.author, "tool_called", tool_id=tool_id, version=version,
                   calls=calls, value_mP=amount)
 
+    # ---- deal market: sell offers and purchases ----
+
+    @transaction
+    def create_offer(self, seller: str, kind: str, title: str, terms_hash: str, price_mP: int,
+                     content_commit: str | None, expires_blocks: int) -> Offer:
+        self.account(seller)
+        if kind != "info":
+            raise BoardError("offer kind must be info (more kinds come later)")
+        if not content_commit:
+            raise BoardError("an info offer needs a content commitment")
+        if not 0 < price_mP <= 100_000:
+            raise BoardError("price must be 1mP..100P")
+        if not 720 <= expires_blocks <= 17_280 * 30:
+            raise BoardError("offers last between 1 hour and 30 days")
+        if sum(1 for o in self.offers.values() if o.seller == seller and o.state == "OPEN") >= 20:
+            raise BoardError("at most 20 open offers per account")
+        o = Offer(self._new_id("o_", seller, title), seller, kind, title[:200], terms_hash, price_mP,
+                  content_commit, self.height, self.height + expires_blocks)
+        self.offers[o.offer_id] = o
+        return o
+
+    @transaction
+    def withdraw_offer(self, seller: str, offer_id: str) -> None:
+        o = self.offers.get(offer_id)
+        if o is None or o.seller != seller or o.state != "OPEN":
+            raise BoardError("no open offer of yours with that id")
+        o.state = "WITHDRAWN"
+
+    @transaction
+    def buy_offer(self, buyer: str, offer_id: str) -> Purchase:
+        o = self.offers.get(offer_id)
+        if o is None or o.state != "OPEN":
+            raise BoardError("no open offer with that id")
+        if buyer == o.seller:
+            raise BoardError("cannot buy your own offer")
+        if any(p.offer_id == offer_id and p.buyer == buyer and p.state not in ("REFUNDED",)
+               for p in self.purchases.values()):
+            raise BoardError("already bought")
+        self._debit_to_escrow(self.account(buyer), o.price_mP)
+        p = Purchase(self._new_id("pu_", buyer, offer_id), offer_id, buyer, o.seller, o.price_mP,
+                     self.height, self.height + 240)
+        self.purchases[p.purchase_id] = p
+        return p
+
+    @transaction
+    def deliver_offer(self, seller: str, purchase_id: str, ciphertext_hash: str) -> None:
+        p = self.purchases.get(purchase_id)
+        if p is None or p.seller != seller or p.state != "PENDING":
+            raise BoardError("no pending purchase to deliver")
+        p.state, p.ciphertext_hash = "DELIVERED", ciphertext_hash
+
+    @transaction
+    def confirm_delivery(self, buyer: str, purchase_id: str, ok: bool, reason_hash: str) -> Purchase:
+        """Buyer's Core decrypted the delivery and checked it against the commitment."""
+        p = self.purchases.get(purchase_id)
+        if p is None or p.buyer != buyer or p.state != "DELIVERED":
+            raise BoardError("no delivered purchase to confirm")
+        if ok:
+            p.state, p.released_height = "COMPLETED", self.height
+            self._pay_from_escrow(p.seller, p.price_mP, lock=True)
+            self.offers[p.offer_id].sold += 1
+            self._rep(p.seller, "info_sold", offer_id=p.offer_id, value_mP=p.price_mP)
+        else:  # content does not match the commitment: the operator decides, payment stays escrowed
+            p.state = "DISPUTED"
+            d = Dispute(self._new_id("d_", buyer, purchase_id), buyer, "deal", purchase_id, reason_hash, 0,
+                        p.seller, self.height, self.height + self.params.dispute_resolve_blocks)
+            self.disputes[d.dispute_id] = d
+        return p
+
     # ---- tool buy orders ----
 
     @transaction
@@ -864,6 +995,14 @@ class Board:
             ev = self._issue_epoch(h // self.params.epoch_blocks - 1)
             if ev:
                 events.append(ev)
+        for o in self.offers.values():
+            if o.state == "OPEN" and h >= o.expires:
+                o.state = "EXPIRED"
+        for pu in self.purchases.values():
+            if pu.state == "PENDING" and h >= pu.deliver_until:
+                pu.state = "REFUNDED"
+                self._pay_from_escrow(pu.buyer, pu.price_mP, lock=False)
+                events.append(BoardEvent("purchase_refunded", None, {"purchase_id": pu.purchase_id}))
         for req in self.tool_requests.values():
             if req.state == "OPEN" and h >= req.deadline:
                 req.state = "EXPIRED"
@@ -895,8 +1034,7 @@ class Board:
                         if e["kind"] == "heartbeat" and e.get("epoch") == epoch})
         income: dict[str, int] = {}
         for e in self.rep_events:
-            if start <= e["height"] < end and e["kind"] in (
-                    "answer_accepted", "answer_auto", "tool_licensed", "tool_called"):
+            if start <= e["height"] < end and e["kind"] in INCOME_KINDS:
                 income[e["account"]] = income.get(e["account"], 0) + e.get("value_mP", 0)
         paid: dict[str, int] = {}
         if alive:

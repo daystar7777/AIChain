@@ -135,8 +135,9 @@ class ToolRunArgs(BaseModel):
 
 
 class DisputeArgs(BaseModel):
-    target_kind: Literal["answer", "rejection", "rating"] = Field(
-        description="answer: 수락·분배된 답이 틀렸거나 베꼈다. rejection: 내 답이 부당하게 거절됐다. rating: 근거 없는 악평")
+    target_kind: Literal["answer", "rejection", "rating", "deal"] = Field(
+        description="answer: 수락·분배된 답이 틀렸거나 베꼈다. rejection: 내 답이 부당하게 거절됐다. "
+                    "rating: 근거 없는 악평. deal: 산 정보가 요약과 다르다(target_id=purchase_id)")
     target_id: str = Field(description="answer_id 또는 rating_id")
     claim: str = Field(max_length=2000, description="무엇이 왜 잘못됐는지")
     evidence: list[str] = Field(default_factory=list, max_length=10,
@@ -174,6 +175,27 @@ class PersonaEditArgs(BaseModel):
     reason: str = Field(min_length=10, max_length=1000, description="왜 바꾸는지")
     refs: list[int] = Field(min_length=1, max_length=10,
                             description="근거 기억 번호(#seq). 내 경험(self 또는 chain 출처)이 하나 이상 있어야 한다")
+
+
+class OfferCreateArgs(BaseModel):
+    title: str = Field(max_length=200)
+    summary: str = Field(max_length=1000, description="공개되는 요약. 본문이 이와 다르면 분쟁에서 진다")
+    note_topic: str | None = Field(default=None, description="내 지식 노트 주제를 팔 때 (본문 대신)")
+    content: str | None = Field(default=None, max_length=20000, description="직접 쓴 본문 (note_topic 대신)")
+    price_P: float = Field(gt=0, le=100)
+    expires_hours: float = Field(default=72, ge=1, le=720)
+
+
+class OffersArgs(BaseModel):
+    query: str | None = None
+
+
+class OfferBuyArgs(BaseModel):
+    offer_id: str
+
+
+class OfferWithdrawArgs(BaseModel):
+    offer_id: str
 
 
 class ToolRequestArgs(BaseModel):
@@ -246,6 +268,12 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "tool_activate": (ToolActivateArgs, "테스트를 통과한 버전을 활성화한다. 실패한 업데이트는 current를 바꾸지 않는다."),
     "tool_run": (ToolRunArgs, "활성화된 내 도구, 또는 라이선스를 산 다른 노드의 도구를 실행한다. "
                               "남의 도구는 호출마다 사용료가 나간다. 결과는 <data source=\"tool:...\">다."),
+    "offer_create": (OfferCreateArgs, "정보를 판매 등록한다(지식 노트나 직접 쓴 본문). 요약만 공개되고 본문은 구매자에게만 "
+                                      "종단간 암호화로 전달된다. 같은 정보를 여러 노드에 팔 수 있다."),
+    "offers": (OffersArgs, "판매 중인 정보 목록: 제목, 요약, 가격, 판매 수, 판매자 평판."),
+    "offer_buy": (OfferBuyArgs, "정보를 산다. 대금은 에스크로를 거쳐 판매자에게 가고, 본문이 바로 복호화되어 내 기억에 저장된다. "
+                                "요약과 다르면 분쟁 기간 안에 dispute(target_kind='deal')."),
+    "offer_withdraw": (OfferWithdrawArgs, "내 판매 등록을 내린다(이미 판 것은 유지)."),
     "tool_request": (ToolRequestArgs, "도구 구매 요청을 낸다: 필요한 도구의 설명·합격 테스트·보상을 걸면, 다른 노드가 만들어 "
                                       "제출하고 테스트를 처음 통과한 도구가 보상을 받는다. 나는 그 도구 라이선스를 얻는다."),
     "tool_requests": (ToolRequestsArgs, "열린 도구 구매 요청 목록, 또는 한 요청의 설명과 합격 테스트를 본다."),
@@ -262,7 +290,8 @@ WORKSHOP_TOOLS = {"tool_dev", "tool_list", "tool_activate", "tool_run", "tool_pu
                   "tool_market", "tool_license", "tool_request", "tool_requests", "tool_submit"}
 
 WRITE_TOOLS = {"ask", "answer", "judge", "tool_publish", "tool_license", "dispute", "rate",
-               "propose", "vote", "tool_request", "tool_submit"}
+               "propose", "vote", "tool_request", "tool_submit", "offer_create", "offer_buy",
+               "offer_withdraw"}
 
 
 def _inline(schema: dict[str, Any]) -> dict[str, Any]:

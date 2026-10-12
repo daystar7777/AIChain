@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ValidationError
 
 from aichain.board import BoardError, BountyState, commitment_of
-from aichain.common import data_block, escape_data, fmt_P, to_mP
+from aichain.common import data_block, escape_data, fmt_P, sha256_hex, to_mP
 from aichain.gateways.web import WebError
 from aichain.gateways.llm.base import (
     BudgetExhausted,
@@ -51,6 +51,10 @@ from aichain.mastermind.tools import (
     HistoryArgs,
     JudgeArgs,
     NoteArgs,
+    OfferBuyArgs,
+    OfferCreateArgs,
+    OffersArgs,
+    OfferWithdrawArgs,
     RecallArgs,
     RememberArgs,
     SearchArgs,
@@ -159,6 +163,8 @@ class Node:
         self._used_web = False
         self._sources_warned = False
         self._tool_failures = 0
+        # Node-private data never put on the chain: plaintext behind my info offers.
+        self.private: dict[str, Any] = net.chain.private_for(cfg.node_id) if net.chain is not None else {}
         self.policy = PolicyGuard(cfg.node_id)
         self.bucket = TokenBucket(cfg.daily_budget_tokens, clock=net.clock_minutes)
         net.gateway.register(cfg.node_id, self.bucket)
@@ -291,7 +297,8 @@ class Node:
             f"- 평판 {self.net.reputation(self.id).value:.2f}\n"
             f"- 다른 노드 평판: {self._peer_reputations()}\n"
             f"- LLM 예산 {self.bucket.remaining()} 토큰, 상태 {self.bucket.state}\n"
-            f"- 내가 판정할 현상금 {len(to_judge)}개\n\n"
+            f"- 내가 판정할 현상금 {len(to_judge)}개\n"
+            f"- 판매 중인 정보 {sum(1 for o in board.offers.values() if o.state == 'OPEN' and o.seller != self.id)}개 (offers로 보기)\n\n"
             "### 열린 현상금\n"
             f"{self._state_text('bounties')}\n\n"
             "## 이 프로토타입에서 쓸 수 있는 도구\n"
@@ -743,6 +750,60 @@ class Node:
             self.net.log(self.id, "rated", subject=args.subject, score=args.score,
                          context_ref=args.context_ref, comment=args.comment[:200])
             return f"{args.subject}를 {args.score:+d}로 평가함 ({r.rating_id})"
+        if isinstance(args, OfferCreateArgs):
+            if args.note_topic:
+                note = self.memory.latest_note(args.note_topic)
+                if note is None or not note.data:
+                    raise BoardError(f"'{args.note_topic}' 지식 노트가 없다")
+                content = json.dumps({"topic": note.topic, **note.data}, ensure_ascii=False, indent=1)
+            elif args.content:
+                content = args.content
+            else:
+                raise BoardError("note_topic 또는 content 중 하나가 필요하다")
+            commit = sha256_hex(content)
+            terms_hash = self.net.put_content({"title": args.title, "summary": args.summary,
+                                               "chars": len(content)}, author=self.id)
+            offer = board.create_offer(self.id, "info", args.title, terms_hash, to_mP(args.price_P),
+                                       commit, round(args.expires_hours * 720))
+            self.private[f"offer:{offer.offer_id}"] = content
+            if self.net.chain is not None:
+                self.net.chain.put_private(self.id, f"offer:{offer.offer_id}", content)
+            self.policy.record_write(0, h)
+            self.net.log(self.id, "offer_created", offer_id=offer.offer_id, title=offer.title,
+                         price=fmt_P(offer.price_mP), chars=len(content))
+            return f"판매 등록 {offer.offer_id}: '{offer.title}' {fmt_P(offer.price_mP)}, 마감 블록 {offer.expires}"
+        if isinstance(args, OffersArgs):
+            rows = []
+            for o in board.offers.values():
+                if o.state != "OPEN" or o.seller == self.id:
+                    continue
+                terms = self.net.content.get(o.terms_hash) or {}
+                text = f"{o.title} {terms.get('summary', '')}"
+                if args.query and args.query.lower() not in text.lower():
+                    continue
+                mine = any(pu.offer_id == o.offer_id and pu.buyer == self.id and pu.state != "REFUNDED"
+                           for pu in board.purchases.values())
+                rows.append(f"- {o.offer_id}{'(구매함)' if mine else ''}: {o.title} | {fmt_P(o.price_mP)} | "
+                            f"판매자 {o.seller} 평판 {self.net.reputation(o.seller).value:.2f} | 판매 {o.sold} | "
+                            f"요약: {terms.get('summary', '')[:200]}")
+            return Prewrapped(data_block("market", "\n".join(rows) or "(판매 중인 정보 없음)"))
+        if isinstance(args, OfferBuyArgs):
+            offer = board.offers.get(args.offer_id)
+            if offer is None:
+                raise BoardError("unknown offer")
+            self.policy.check_spend(offer.price_mP, acct.available_mP, h, bounty=False)
+            pu = board.buy_offer(self.id, args.offer_id)
+            self.policy.record_write(offer.price_mP, h)
+            plaintext = self.net.complete_purchase(pu.purchase_id)
+            if plaintext is None:
+                return f"구매 {pu.purchase_id}: 판매자 전달을 기다린다(마감 블록 {pu.deliver_until}, 못 받으면 환불)"
+            return Prewrapped(data_block(f"deal:{offer.seller}", plaintext[:8000],
+                                         trust=self.net.reputation(offer.seller).value,
+                                         purchase=pu.purchase_id))
+        if isinstance(args, OfferWithdrawArgs):
+            board.withdraw_offer(self.id, args.offer_id)
+            self.policy.record_write(0, h)
+            return f"{args.offer_id} 판매 중단"
         if isinstance(args, ToolRequestArgs):
             reward = to_mP(args.reward_P)
             self.policy.check_spend(reward, acct.available_mP, h, bounty=True)
@@ -917,6 +978,12 @@ class Node:
                                  "outcome": str(b.outcome) if b.outcome else str(b.state),
                                  **({"title": q.get("title", "")[:80]} if what == "bounties" else {})})
             if what == "trades":
+                for pu in board.purchases.values():
+                    if rel(pu.buyer, pu.seller):
+                        rows.append({"purchase_id": pu.purchase_id, "asker": pu.buyer, "answerer": pu.seller,
+                                     "accepted": pu.state == "COMPLETED", "rejected": pu.state == "REFUNDED",
+                                     "reward": pu.price_mP / 1000, "height": pu.height, "outcome": pu.state,
+                                     "kind": "info"})
                 for r in board.tool_requests.values():
                     for sub in r.submissions:
                         if rel(r.buyer, sub["seller"]):

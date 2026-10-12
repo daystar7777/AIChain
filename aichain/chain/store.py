@@ -28,7 +28,7 @@ from aichain.chain.errors import ChainHalted
 
 CHAIN_ID = "aichain-dev-1"
 ROOT_ACCOUNT = "root"
-ROOT_VERSION = "v8"  # bump when the state-root definition changes
+ROOT_VERSION = "v9"  # bump when the state-root definition changes
 ROOT_CHECK_EVERY = 120
 CHECKPOINT_EVERY = ROOT_CHECK_EVERY  # kept for callers/tests
 VALID_FOR_BLOCKS = 120_960
@@ -40,7 +40,9 @@ SENDER_FIELD = {"open_account": None, "create_bounty": "asker", "commit_answer":
                 "license_tool": "buyer", "pay_tool_use": "user", "open_dispute": "opener",
                 "resolve_dispute": None, "rate": "rater", "create_proposal": "proposer",
                 "vote": "voter", "veto_proposal": None, "create_tool_request": "buyer",
-                "submit_tool": "seller", "verify_submission": None}
+                "submit_tool": "seller", "verify_submission": None, "create_offer": "seller",
+                "withdraw_offer": "seller", "buy_offer": "buyer", "deliver_offer": "seller",
+                "confirm_delivery": "buyer"}
 
 
 class ReplayMismatch(Exception):
@@ -61,6 +63,8 @@ class ChainStore:
         seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, height INTEGER NOT NULL,
         id TEXT NOT NULL, data TEXT NOT NULL, sig TEXT NOT NULL, ts REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS content (hash TEXT PRIMARY KEY, author TEXT, body TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS private (
+        node TEXT NOT NULL, key TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (node, key));
     CREATE TABLE IF NOT EXISTS sealed (
         answer_id TEXT PRIMARY KEY, node TEXT NOT NULL, body TEXT NOT NULL, salt TEXT NOT NULL);
     """
@@ -124,6 +128,16 @@ class ChainStore:
             rows = self._conn.execute("SELECT answer_id, body, salt FROM sealed WHERE node = ?",
                                       (node,)).fetchall()
         return {a: (json.loads(b), s) for a, b, s in rows}
+
+    def put_private(self, node: str, key: str, body: Any) -> None:
+        """Node-private data (e.g. the plaintext behind an info offer); never on the chain."""
+        self._write("INSERT OR REPLACE INTO private VALUES (?, ?, ?)",
+                    (node, key, json.dumps(body, ensure_ascii=False)))
+
+    def private_for(self, node: str) -> dict[str, Any]:
+        with self._lock:
+            rows = self._conn.execute("SELECT key, body FROM private WHERE node = ?", (node,)).fetchall()
+        return {k: json.loads(b) for k, b in rows}
 
     def close(self) -> None:
         with self._lock:
