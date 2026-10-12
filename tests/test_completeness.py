@@ -152,3 +152,21 @@ def test_operator_can_queue_a_tick(tmp_path):
     assert net.nodes["n2"].has_pending
     assert c.post("/admin/v1/nodes/zz/tick", json={"kind": "economy_tick"}).status_code == 404
     assert c.post("/admin/v1/nodes/n2/tick", json={"kind": "transfer"}).status_code == 422
+
+
+def test_admin_action_while_network_is_busy_is_accepted(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from aichain.bridge.runtime import NetworkRuntime
+    from aichain.bridge.server import create_app
+    from aichain.bridge.tokens import TokenStore
+
+    rt = NetworkRuntime(build_network("scripted"))
+
+    def busy(fn, timeout=30.0):
+        raise TimeoutError()
+    rt.call = busy
+    c = TestClient(create_app(rt, TokenStore.load(tmp_path / "t.json"), admin_token="adm"),
+                   headers={"Authorization": "Bearer adm"})
+    r = c.post("/admin/v1/nodes/n2/tick", json={"kind": "economy_tick"})
+    assert r.status_code == 202 and r.json()["accepted"] is True

@@ -59,6 +59,15 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
 
     app = FastAPI(title="AIChain Bridge API", version="0.0.1", lifespan=lifespan)
 
+    @app.exception_handler(TimeoutError)
+    async def busy(request: Any, exc: TimeoutError) -> Any:
+        # runtime.call waits for the simulation thread, which may be inside a long LLM episode.
+        # The action stays queued and runs as soon as the thread is free.
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse({"accepted": True, "detail": "the network is busy with an episode; the action "
+                             "is queued and will run when it finishes"}, status_code=202)
+
     def client_of(
         creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
     ) -> Client:
