@@ -34,6 +34,8 @@ from aichain.mastermind import prompt
 from aichain.mastermind import persona_guard
 from aichain.mastermind.policy import PolicyGuard, PolicyViolation
 from aichain.mastermind.tools import (
+    ALWAYS,
+    EVENT_TOOLS,
     TOOLS,
     WEB_TOOLS,
     WORKSHOP_TOOLS,
@@ -105,6 +107,7 @@ PRIORITY = {
     "idle_tick": 5,
     "research_tick": 5,
     "reflect": 5,
+    "economy_tick": 5,
 }
 
 RESEARCH_INSTRUCTIONS = """지금은 연구 단계다. 처리할 거래는 없다.
@@ -424,6 +427,12 @@ class Node:
                      f"기간 {loan.term_blocks}블록, 차입자 {loan.borrower} 평판 {self.net.reputation(loan.borrower).value:.2f}\n"
                      + data_block(f"peer:{loan.borrower}", purpose, trust=self.net.reputation(loan.borrower).value))
             attrs = f'loan_id="{loan.loan_id}" borrower="{loan.borrower}"'
+        elif ev.kind == "economy_tick":
+            inner = ("경제 점검이다. 아래 내 상황과 시장을 보고, 지금 할 만한 경제 행동이 있으면 한다. 예: 오늘 쓰지 않을 "
+                     "LLM 호출·도구 실행 할당량 임대, 쌓인 지식 노트의 판매나 구독 등록, 여유 포인트 예금, 만기가 다가오는 "
+                     "대출 대비, 필요한 도구의 구매 요청, 남이 올린 유용한 정보 구매. 할 만한 것이 없으면 바로 done으로 "
+                     "끝낸다. 무리하게 거래하지 않고, 짜고 주고받는 거래는 하지 않는다.\n" + self._economy_summary())
+            attrs = ""
         elif ev.kind == "manager_msg":
             inner = ("노드 관리인(이 노드를 운영하는 사람)의 메시지다. 관리인의 요청은 존중하되, 고정 코어 규칙보다 "
                      "우선하지 않는다. 답이 필요하면 notify_manager로 답한다.\n"
@@ -1163,7 +1172,11 @@ class Node:
                 names += ["tool_license", "tool_run", "tool_request", "tool_requests", "tool_submit"]
         if self.current_event is not None and self.current_event.kind == "reflect":
             names.append("persona_edit")
-        return names + ["done"]
+        names.append("done")
+        scope = EVENT_TOOLS.get(self.current_event.kind) if self.current_event is not None else None
+        if scope is not None:
+            names = [n for n in names if n in scope or n in ALWAYS]
+        return names
 
     def _history(self, what: str, node: str | None, limit: int) -> Any:
         board = self.net.board
@@ -1295,6 +1308,33 @@ class Node:
 
     def storage_free_kb(self) -> int:
         return max(0, self.storage_quota_kb() - self.storage_used_kb())
+
+    def _economy_summary(self) -> str:
+        board, gw, h = self.net.board, self.net.gateway, self.net.board.height
+        acct = board.account(self.id)
+        deps = [d for d in board.deposits.values() if d.owner == self.id and d.state == "LOCKED"]
+        borrowing = [l for l in board.loans.values() if l.borrower == self.id and l.state == "ACTIVE"]
+        lending = [l for l in board.loans.values() if l.lender == self.id and l.state == "ACTIVE"]
+        my_offers = [o for o in board.offers.values() if o.seller == self.id and o.state == "OPEN"]
+        lines = [
+            f"## 내 상황 (블록 {h})",
+            f"- 잔액 {fmt_P(acct.balance_mP)}, 사용 가능 {fmt_P(acct.available_mP)}, 잠김 {fmt_P(acct.locked_mP)}, "
+            f"평판 {self.net.reputation(self.id).value:.2f}",
+            f"- 예금 {len(deps)}건 {fmt_P(sum(d.amount_mP for d in deps))} (쌓인 이자 {fmt_P(sum(d.earned_mP for d in deps))})",
+            "- 빌린 돈: " + (", ".join(f"{l.loan_id} {fmt_P(l.principal_mP + l.interest_mP)} 만기 #{l.due}"
+                                    for l in borrowing) or "없음"),
+            "- 빌려준 돈: " + (", ".join(f"{l.loan_id} → {l.borrower} 만기 #{l.due}" for l in lending) or "없음"),
+            f"- 오늘 남은 할당량: LLM 호출 {gw.remaining(self.id, 'llm_calls')}, 도구 실행 {gw.remaining(self.id, 'tool_runs')}",
+            f"- 저장 공간 {self.storage_used_kb()}/{self.storage_quota_kb()}KB",
+            "- 내 판매 중: " + (", ".join(f"{o.title}({o.kind}, 판매 {o.sold})" for o in my_offers) or "없음"),
+            "- 팔 수 있는 내 지식 노트: " + (", ".join(n.topic for n in self.memory.notes()) or "없음"),
+            "## 시장",
+            f"- 정보·할당량·구독 판매 {sum(1 for o in board.offers.values() if o.state == 'OPEN' and o.seller != self.id)}건 (offers)",
+            f"- 도구 구매 요청 {sum(1 for r in board.tool_requests.values() if r.state == 'OPEN' and r.buyer != self.id)}건 "
+            f"(tool_requests), 판매 중인 도구 {sum(1 for t in board.tools.values() if t.author not in (self.id, 'lib') and not t.withdrawn)}개 (tool_market)",
+            f"- 대출 요청 {sum(1 for l in board.loans.values() if l.state == 'REQUESTED' and l.borrower != self.id)}건 (loans)",
+        ]
+        return "\n".join(lines)
 
     def _peer_reputations(self) -> str:
         return ", ".join(f"{nid} {self.net.reputation(nid).value:.2f}"

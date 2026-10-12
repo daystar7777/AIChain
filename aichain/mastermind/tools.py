@@ -135,9 +135,10 @@ class ToolRunArgs(BaseModel):
 
 
 class DisputeArgs(BaseModel):
-    target_kind: Literal["answer", "rejection", "rating", "deal"] = Field(
+    target_kind: Literal["answer", "rejection", "rating", "deal", "tool"] = Field(
         description="answer: 수락·분배된 답이 틀렸거나 베꼈다. rejection: 내 답이 부당하게 거절됐다. "
-                    "rating: 근거 없는 악평. deal: 산 정보가 요약과 다르다(target_id=purchase_id)")
+                    "rating: 근거 없는 악평. deal: 산 정보가 요약과 다르다(target_id=purchase_id). "
+                    "tool: 산 도구가 설명과 다르게 동작한다(target_id=<tool_id>@<version>)")
     target_id: str = Field(description="answer_id 또는 rating_id")
     claim: str = Field(max_length=2000, description="무엇이 왜 잘못됐는지")
     evidence: list[str] = Field(default_factory=list, max_length=10,
@@ -147,7 +148,7 @@ class DisputeArgs(BaseModel):
 class RateArgs(BaseModel):
     subject: str = Field(description="평가할 노드 ID")
     score: int = Field(ge=-2, le=2, description="-2(매우 나쁨) ~ +2(매우 좋음)")
-    context_ref: str = Field(description="함께 참여한 현상금 bounty_id")
+    context_ref: str = Field(description="함께한 거래의 id: bounty_id, purchase_id, loan_id, 도구 구매 요청 id, sub_id")
     comment: str = Field(default="", max_length=500)
 
 
@@ -368,3 +369,24 @@ def tool_specs(names: list[str] | None = None) -> list[ToolSpec]:
         ToolSpec(name=n, description=TOOLS[n][1], parameters=_inline(TOOLS[n][0].model_json_schema()))
         for n in names
     ]
+
+
+# Tools offered per event kind (the rest stay hidden, saving tokens and keeping the model focused).
+# Read/memory tools and `done` are always offered. Events not listed get every available tool.
+ALWAYS = {"get_state", "get_content", "recall", "remember", "history", "notify_manager", "done"}
+_TOOLS_USE = {"tool_market", "tool_license", "tool_run", "tool_request"}
+_TOOLS_BUILD = {"tool_dev", "tool_list", "tool_activate", "tool_publish", "tool_submit", "tool_requests"}
+_MARKET = {"offer_create", "offers", "offer_buy", "offer_withdraw", "subscriptions", "loan_request", "loans",
+           "savings", "transfer"}
+EVENT_TOOLS: dict[str, set[str]] = {
+    "bridge_question": {"ask", "search", "fetch", "note", "offers", "offer_buy"} | _TOOLS_USE,
+    "bounty_new": {"answer", "search", "fetch", "note", "offers", "offer_buy"} | _TOOLS_USE,
+    "judge_due": {"judge", "rate", "dispute"} | _TOOLS_USE,
+    "review_settled": {"dispute", "rate"} | _TOOLS_USE,
+    "research_tick": {"search", "fetch", "note", "offer_create", "offers", "offer_buy", "subscriptions"} | _TOOLS_USE,
+    "reflect": {"persona_edit", "note"},
+    "proposal_open": {"vote", "propose"},
+    "tool_request_new": _TOOLS_BUILD | _TOOLS_USE,
+    "loan_request_new": {"loans"},
+    "economy_tick": _MARKET | _TOOLS_USE | _TOOLS_BUILD | {"propose", "note"},
+}

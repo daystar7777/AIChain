@@ -17,7 +17,9 @@ from typing import Any
 E6 = 1_000_000
 HALF_LIFE_BLOCKS = 120_960  # 7 days
 # Reputation events that carry confirmed income (value_mP): reputation V, issuance, metrics.
-INCOME_KINDS = ("answer_accepted", "answer_auto", "tool_licensed", "tool_called", "info_sold", "loan_interest")
+# Loan interest is deliberately excluded: lending is a transfer between nodes, not new
+# contribution, so it moves balances but not reputation (V) or the issuance contribution pool.
+INCOME_KINDS = ("answer_accepted", "answer_auto", "tool_licensed", "tool_called", "info_sold")
 EPOCH_BLOCKS = 720
 WEIGHTS_E6 = {"A": 300_000, "V": 150_000, "J": 150_000, "T": 100_000, "W": 100_000,
               "U": 100_000, "S": 100_000}

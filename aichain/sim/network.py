@@ -43,6 +43,8 @@ class Network:
         self.research_interval_blocks = research_interval_blocks
         # Daily reflection (04 doc 5.2), staggered per node; None disables.
         self.reflect_interval_blocks: int | None = None
+        # Periodic economy check per node (staggered); None disables.
+        self.economy_interval_blocks: int | None = None
         self.board = Board(params)
         self.content = ContentStore()
         self.chain_stats: dict[str, int] | None = None
@@ -417,6 +419,15 @@ class Network:
                 due = [nid for i, nid in enumerate(ids) if (self.board.height + i * offset) % r == 0]
                 if due:
                     self.reflect(due)
+            e = self.economy_interval_blocks
+            if e and self.nodes:
+                ids = sorted(self.nodes)
+                offset = e // len(ids)
+                for i, nid in enumerate(ids):
+                    node = self.nodes[nid]
+                    if (self.board.height + i * offset + offset // 2) % e == 0 and not node.has_pending \
+                            and self.gateway.has_daily_room(nid):
+                        node.enqueue("economy_tick", {})
             n = self.research_interval_blocks
             if n and self.board.height % n == 0:
                 self.research([nd.id for nd in self.nodes.values() if not nd.has_pending])

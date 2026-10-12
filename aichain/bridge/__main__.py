@@ -69,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--research", action="store_true",
                     help="let idle nodes research their interests on the web (off by default)")
     ap.add_argument("--research-minutes", type=float, default=30.0)
+    ap.add_argument("--economy-hours", type=float, default=4.0,
+                    help="periodic economy check per node (0 disables)")
     ap.add_argument("--reflect-hours", type=float, default=24.0,
                     help="daily reflection and persona self-editing per node (0 disables)")
     ap.add_argument("--browser", default=None)
@@ -128,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
         net.approvals = ApprovalBook(ManagerPolicy(approval_threshold_mP=round(args.approval_threshold_P * 1000),
                                                    timeout_hours=args.approval_timeout_hours),
                                      ROOT / "data" / "approvals.json")
+        if args.economy_hours > 0:
+            net.economy_interval_blocks = max(1, round(args.economy_hours * 3600 / args.block_seconds))
         if args.reflect_hours > 0:
             net.reflect_interval_blocks = max(1, round(args.reflect_hours * 3600 / args.block_seconds))
         journal = None

@@ -595,6 +595,14 @@ class Board:
                 raise BoardError("rejection disputes apply to refunded bounties in their lock period")
             revealed = sum(1 for a in b.answers if self.answers[a].revealed)
             amount, defendant, bounty_id = b.reward_mP // max(revealed, 1), b.asker, b.bounty_id
+        elif target_kind == "tool":
+            tool_id, _, ver = target_id.rpartition("@")
+            listing = self.tools.get((tool_id, int(ver) if ver.isdigit() else -1))
+            if listing is None:
+                raise BoardError("target_id must be <tool_id>@<version> of a published tool")
+            if (opener, tool_id, listing.version) not in self.licenses:
+                raise BoardError("only license holders can dispute a tool")
+            amount, defendant, bounty_id = listing.price_install_mP, listing.author, None
         elif target_kind == "deal":
             pu = self.purchases.get(target_id)
             if pu is None or pu.buyer != opener:
@@ -612,7 +620,7 @@ class Board:
                 raise BoardError("rating dispute window has passed")
             amount, defendant, bounty_id = 0, r.rater, None
         else:
-            raise BoardError("target_kind must be answer, rejection, rating or deal")
+            raise BoardError("target_kind must be answer, rejection, rating, deal or tool")
         if any(d.target_id == target_id and d.state == "open" for d in self.disputes.values()):
             raise BoardError("this target already has an open dispute")
         bond = 1000 if target_kind == "rating" else max(1000, amount * p.dispute_bond_bp // 10_000)
@@ -682,6 +690,13 @@ class Board:
             for e in self.rep_events:  # the rejection no longer counts against the author
                 if e["kind"] == "answer_rejected" and e["account"] == d.opener and e.get("bounty_id") == b.bounty_id:
                     e["kind"] = "answer_rejected_overturned"
+        elif d.target_kind == "tool":
+            tool_id, _, ver = d.target_id.rpartition("@")
+            listing = self.tools[(tool_id, int(ver))]
+            taken = self._take_back(listing.author, listing.price_install_mP)
+            self.account(d.opener).balance_mP += taken
+            listing.withdrawn = True
+            self._rep(listing.author, "dispute_lost_tool", dispute_id=d.dispute_id)
         elif d.target_kind == "deal":
             pu = self.purchases[d.target_id]
             taken = self._take_back(pu.seller, pu.price_mP)
@@ -694,6 +709,27 @@ class Board:
                 if e["kind"] == "rated" and e.get("rating_id") == d.target_id:
                     e["kind"] = "rated_void"
 
+    def _rating_context(self, ref: str) -> tuple[set[str], bool]:
+        """Who took part in a deal and whether it is settled: bounty, purchase, loan, tool request,
+        subscription."""
+        if ref in self.bounties:
+            b = self.bounties[ref]
+            return ({b.asker, *(self.answers[a].author for a in b.answers)},
+                    b.state in SETTLED_STATES | {BountyState.FINAL, BountyState.EXPIRED})
+        if ref in self.purchases:
+            p = self.purchases[ref]
+            return {p.buyer, p.seller}, p.state in ("COMPLETED", "REFUNDED")
+        if ref in self.loans:
+            l = self.loans[ref]
+            return {l.borrower, *( [l.lender] if l.lender else [])}, l.state in ("REPAID", "DEFAULTED")
+        if ref in self.tool_requests:
+            r = self.tool_requests[ref]
+            return {r.buyer, *(x["seller"] for x in r.submissions)}, r.state in ("FULFILLED", "EXPIRED")
+        if ref in self.subscriptions:
+            x = self.subscriptions[ref]
+            return {x.subscriber, x.seller}, x.periods_paid + x.periods_refunded > 0 or x.state == "ENDED"
+        raise BoardError(f"unknown deal {ref}")
+
     @transaction
     def rate(self, rater: str, subject: str, score: int, context_ref: str) -> Rating:
         """-2..+2 about someone you dealt with in one bounty (01 doc 3.2), once per context."""
@@ -701,12 +737,11 @@ class Board:
             raise BoardError("cannot rate yourself")
         if score not in (-2, -1, 0, 1, 2):
             raise BoardError("score must be -2..2")
-        b = self.bounty(context_ref)
-        involved = {b.asker, *(self.answers[a].author for a in b.answers)}
+        involved, settled = self._rating_context(context_ref)
         if rater not in involved or subject not in involved:
-            raise BoardError("both accounts must have taken part in this bounty")
-        if b.state not in SETTLED_STATES | {BountyState.FINAL, BountyState.EXPIRED}:
-            raise BoardError("rate after the bounty is settled")
+            raise BoardError("both accounts must have taken part in this deal")
+        if not settled:
+            raise BoardError("rate after the deal is settled")
         if any(r.rater == rater and r.subject == subject and r.context_ref == context_ref
                for r in self.ratings.values()):
             raise BoardError("already rated for this bounty")

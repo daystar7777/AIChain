@@ -105,3 +105,19 @@ def test_savings_earn_from_issuance_and_forfeit_early():
     b.advance(720)  # epoch 1 (no heartbeat): only b saves -> full savings pool; then matures
     assert d1.state == "MATURED" and b.accounts["b"].balance_mP == 100_000 + 54_000 + 72_000
     assert b.total_supply_check()
+
+
+def test_loan_interest_is_not_income_for_reputation_or_issuance():
+    from aichain.reputation import INCOME_KINDS
+
+    assert "loan_interest" not in INCOME_KINDS
+    b = Board(Params())
+    b.open_account("lender", 100_000)
+    b.open_account("borrower", 100_000)
+    loan = b.create_loan_request("borrower", 20_000, 5_000, 0, 720, "t")
+    b.fund_loan("lender", loan.loan_id)
+    before = for_board(b, "lender").terms_e6["V"]
+    b.repay_loan("borrower", loan.loan_id)
+    assert for_board(b, "lender").terms_e6["V"] == before
+    b.advance(720)  # nobody sent a heartbeat and nobody had income -> nothing issued
+    assert b.issued_mP == 200_000
