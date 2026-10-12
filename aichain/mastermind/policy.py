@@ -88,3 +88,16 @@ class PolicyGuard:
         if self.consecutive_violations >= self.limits.pause_after_violations:
             self.paused = True
         raise PolicyViolation(reason)
+
+    # ---- persistence: spend/dispute/rating history is height-based, so it stays valid across restarts ----
+
+    def dump(self) -> dict:
+        return {"spends": self.spends[-500:], "disputes": self.disputes[-100:], "ratings": self.ratings[-200:],
+                "consecutive_violations": self.consecutive_violations, "paused": self.paused}
+
+    def restore(self, d: dict) -> None:
+        self.spends = [tuple(x) for x in d.get("spends", [])]
+        self.disputes = list(d.get("disputes", []))
+        self.ratings = [tuple(x) for x in d.get("ratings", [])]
+        self.consecutive_violations = int(d.get("consecutive_violations", 0))
+        self.paused = bool(d.get("paused", False))

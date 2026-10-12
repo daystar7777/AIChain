@@ -74,3 +74,60 @@ def test_tool_disputes_refund_and_withdraw():
     b.resolve_dispute("root", d.dispute_id, "uphold", "")
     assert b.accounts["buyer"].balance_mP == 100_000 and b.tools[("author.x", 1)].withdrawn
     assert for_board(b, "author").terms_e6["T"] < 500_000 and b.total_supply_check()
+
+
+def test_self_audit_finds_broken_books_and_alerts():
+    from aichain import audit
+    from aichain.board import Board, Params
+
+    b = Board(Params(issuance=False))
+    b.open_account("a", 10_000)
+    assert audit.run(b) == []
+    b.accounts["a"].balance_mP += 5  # minted from nowhere
+    b.accounts["a"].locked_mP = 3
+    problems = audit.run(b)
+    assert any("supply mismatch" in p for p in problems) and any("sum of locks" in p for p in problems)
+
+
+def test_audit_runs_hourly_on_the_network():
+    net = build_network("scripted")
+    net.audit_interval_blocks = 50
+    net.advance(50)
+    assert [e["ok"] for e in net.events if e["event"] == "audit"] == [True]
+    net.board.accounts["n1"].balance_mP += 1
+    net.advance(50)
+    assert any(e["event"] == "audit_alert" for e in net.events)
+    assert "자기 감사" in net.manager_outbox[-1]["text"]
+
+
+def test_bridge_records_and_policy_history_survive_restart(tmp_path):
+    from aichain.bridge.runtime import NetworkRuntime
+
+    path = tmp_path / "bridge_state.json"
+    net = build_network("scripted")
+    rt = NetworkRuntime(net, state_path=path)
+    rec = rt.submit("client", "t", "b", "c")
+    net.nodes["n1"].policy.record_spend(1234, net.board.height)
+    rt.save_state()
+    net2 = build_network("scripted")
+    rt2 = NetworkRuntime(net2, state_path=path)
+    q = rt2.question(rec.ref)
+    assert q["status"] == "failed" and "restarted" in q["note"]
+    assert net2.nodes["n1"].policy.spent_last_hour(net2.board.height) == 1234
+
+
+def test_journal_drops_old_prompts_but_keeps_responses(tmp_path):
+    import time
+
+    from aichain.journal.store import Journal, connect
+
+    j = Journal(tmp_path / "j.db", keep_prompts_days=14)
+    j.start_run("t")
+    j.record("llm_call", {"messages": [{"role": "user", "content": "long prompt"}],
+                          "response": {"text": "ok"}})
+    j.record("tool", {"tool": "x"})
+    assert j.prune(now=time.time() + 13 * 86400) == 0
+    assert j.prune(now=time.time() + 15 * 86400) == 1
+    rows = {k: json.loads(d) for k, d in connect(tmp_path / "j.db").execute("SELECT kind, data FROM entries")}
+    assert "messages" not in rows["llm_call"] and rows["llm_call"]["messages_pruned"] is True
+    assert rows["llm_call"]["response"] == {"text": "ok"} and rows["tool"] == {"tool": "x"}

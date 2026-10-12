@@ -8,8 +8,12 @@ this module maintains (each guarded by a short lock).
 
 from __future__ import annotations
 
+import json
+import os
 import queue
 import secrets
+from dataclasses import asdict
+from pathlib import Path
 from concurrent.futures import Future
 import threading
 import time
@@ -21,6 +25,8 @@ from aichain.common import fmt_P
 from aichain.sim.network import Network
 
 TERMINAL = {"settled", "no_bounty", "failed"}
+KEEP_SECONDS = 30 * 86400  # question records older than this (and finished) are dropped
+SAVE_EVERY_SECONDS = 30.0
 
 
 @dataclass
@@ -55,7 +61,8 @@ class QuestionRecord:
 
 
 class NetworkRuntime:
-    def __init__(self, net: Network, block_seconds: float = 5.0, bridge_node: str = "n1") -> None:
+    def __init__(self, net: Network, block_seconds: float = 5.0, bridge_node: str = "n1",
+                 state_path: Path | None = None) -> None:
         self.net = net
         self.block_seconds = block_seconds
         self.bridge_node = bridge_node
@@ -69,8 +76,53 @@ class NetworkRuntime:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.errors: list[str] = []
+        self.state_path = state_path
+        self._last_save = 0.0
+        self._load_state()
         net.listeners.append(self._on_log)
         self._refresh_snapshot()
+
+    # ---- persistence: Bridge question records and Policy Guard history survive restarts ----
+
+    def _load_state(self) -> None:
+        if self.state_path is None or not self.state_path.exists():
+            return
+        raw = json.loads(self.state_path.read_text(encoding="utf-8"))
+        for d in raw.get("questions", []):
+            rec = QuestionRecord(**d)
+            if rec.status not in TERMINAL and rec.bounty_id is None:
+                # Its episode was lost with the old process; tell the client instead of hanging.
+                rec.note = "the network restarted before this question became a bounty; please ask again"
+                rec.status = "failed"
+                rec.events.append({"id": len(rec.events) + 1, "event": "failed", "time": time.time(),
+                                   "height": self.net.board.height, "note": rec.note})
+            self._questions[rec.ref] = rec
+            if rec.bounty_id and rec.bounty_id in self.net.board.bounties:
+                self._by_bounty[rec.bounty_id] = rec.ref
+        for node_id, d in raw.get("policy", {}).items():
+            if node_id in self.net.nodes:
+                self.net.nodes[node_id].policy.restore(d)
+
+    def save_state(self) -> None:
+        if self.state_path is None:
+            return
+        now = time.time()
+        with self._lock:
+            for ref in [r for r, q in self._questions.items()
+                        if q.status in TERMINAL and now - q.created_at > KEEP_SECONDS]:
+                q = self._questions.pop(ref)
+                if q.bounty_id:
+                    self._by_bounty.pop(q.bounty_id, None)
+            data = {"questions": [asdict(q) for q in self._questions.values()],
+                    "policy": {n.id: n.policy.dump() for n in self.net.nodes.values()}}
+            text = json.dumps(data, ensure_ascii=False)
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.state_path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        tmp.replace(self.state_path)
+        self._last_save = time.monotonic()
 
     # ---- lifecycle ----
 
@@ -84,13 +136,21 @@ class NetworkRuntime:
         if self._thread is not None:
             self._thread.join(timeout)
             self._thread = None
+        self.save_state()
 
     def _loop(self) -> None:
         last_block = time.monotonic()
         failures = 0
+        halt_reported = False
         while not self._stop.is_set():
             if self.net.halted:
                 # Fail closed: stop producing blocks and running episodes; the API keeps answering.
+                if not halt_reported:
+                    halt_reported = True
+                    try:
+                        self.net.manager_send("core", f"⛔ 체인이 멈췄어요: {self.net.halted}")
+                    except Exception:
+                        pass
                 self._refresh_snapshot()
                 self._stop.wait(1.0)
                 continue
@@ -102,6 +162,8 @@ class NetworkRuntime:
                     last_block = time.monotonic()
                     self.net.advance(1)
                 self._refresh_snapshot()
+                if time.monotonic() - self._last_save >= SAVE_EVERY_SECONDS:
+                    self.save_state()
                 failures = 0
             except Exception as e:  # keep the network alive; surface the error, back off if it repeats
                 failures += 1

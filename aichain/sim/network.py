@@ -10,6 +10,7 @@ import json
 import sys
 from typing import Any, Callable, TextIO
 
+from aichain import audit
 from aichain.board import Board, BoardError, BoardEvent, Params
 from aichain.common import sha256_hex
 from aichain.reputation import EPOCH_BLOCKS, Reputation, for_board
@@ -35,6 +36,7 @@ class Network:
         self.gateway = gateway
         self.chain = chain
         self.approvals = None  # ApprovalBook: outflows wait for the human manager
+        self.audit_interval_blocks = audit.AUDIT_INTERVAL_BLOCKS
         self.manager_outbox: list[dict[str, Any]] = []  # node -> manager messages (Telegram picks them up)
         self.workshop = workshop
         self.web = web
@@ -437,6 +439,8 @@ class Network:
                         self.board.heartbeat(node.id, self.board.height // EPOCH_BLOCKS)
                     except BoardError:
                         pass
+            if self.audit_interval_blocks and self.board.height % self.audit_interval_blocks == 0:
+                audit.run_on_network(self)
             for node in self.nodes.values():
                 node.run_duties()
             self.run_approvals()

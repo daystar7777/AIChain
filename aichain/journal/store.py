@@ -132,9 +132,16 @@ class Journal:
 
     METRICS_EVERY_BLOCKS = 60  # 5 minutes at 5 s/block
 
-    def __init__(self, path: Path, snapshot_interval: float = 0.5, record_plaintext: bool = True) -> None:
+    PRUNE_EVERY_SECONDS = 6 * 3600
+
+    def __init__(self, path: Path, snapshot_interval: float = 0.5, record_plaintext: bool = True,
+                 keep_prompts_days: float = 14.0) -> None:
         """record_plaintext: keep the bodies of traded information in the journal (development).
-        Off: they are replaced by a hash before anything is written."""
+        Off: they are replaced by a hash before anything is written.
+        keep_prompts_days: full LLM prompts (the bulk of the journal) are dropped from llm_call
+        entries older than this; the response, tool calls and token usage stay. 0 keeps them forever."""
+        self.keep_prompts_days = keep_prompts_days
+        self._last_prune = 0.0
         self.path = path
         self.record_plaintext = record_plaintext
         self._conn = connect(path)
@@ -185,6 +192,20 @@ class Journal:
                 (self.run_id, time.time(), height, node, kind, episode, payload))
             self._conn.commit()
 
+    def prune(self, now: float | None = None) -> int:
+        """Drop the prompt messages of old llm_call entries. Returns how many entries changed."""
+        if self.keep_prompts_days <= 0:
+            return 0
+        cutoff = (now if now is not None else time.time()) - self.keep_prompts_days * 86400
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE entries SET data = json_set(json_remove(data, '$.messages'), "
+                "'$.messages_pruned', json('true')) WHERE kind = 'llm_call' AND ts < ? "
+                "AND json_extract(data, '$.messages') IS NOT NULL", (cutoff,))
+            self._conn.commit()
+            self._last_prune = time.time()
+            return cur.rowcount
+
     # ---- attaching to a network ----
 
     def attach(self, net: Any) -> None:
@@ -201,6 +222,8 @@ class Journal:
                     episode=e.get("episode"))
         self._check_balances()
         self.write_snapshot()
+        if time.time() - self._last_prune >= self.PRUNE_EVERY_SECONDS:
+            self.prune()
 
     def _on_llm_call(self, request: Any, response: Any, info: dict[str, Any]) -> None:
         net = self._net

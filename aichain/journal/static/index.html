@@ -425,7 +425,7 @@ async function openEpisode(ep) {
         const content = m.content ?? (m.tool_calls ? JSON.stringify(m.tool_calls, null, 1) : "");
         const open = m.role === "user" || m.role === "tool" ? "open" : "";
         return `<details ${open}><summary class="msg-role">${esc(m.role)}${m.name ? " · " + esc(m.name) : ""} (${String(content).length}자)</summary><pre>${esc(content)}</pre></details>`;
-      }).join("");
+      }).join("") || (d.messages_pruned ? `<pre>보관 기간이 지나 프롬프트는 지웠어요. 응답과 토큰 수는 남아 있어요.</pre>` : "");
       const r = d.response;
       const resp = r ? `<div class="msg-role">모델 응답 · 입력 ${r.usage.input_tokens} / 출력 ${r.usage.output_tokens} 토큰 · ${d.latency_ms}ms</div>
         ${r.text ? `<pre>${esc(r.text)}</pre>` : ""}

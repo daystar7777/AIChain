@@ -66,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="no answer from the manager -> Core executes after this (minimum 72)")
     ap.add_argument("--journal-plaintext", choices=["on", "off"], default="on",
                     help="keep traded information bodies in the journal (development; turn off later)")
+    ap.add_argument("--journal-keep-prompts-days", type=float, default=14.0,
+                    help="drop LLM prompt text from journal entries older than this (0 keeps forever)")
     ap.add_argument("--research", action="store_true",
                     help="let idle nodes research their interests on the web (off by default)")
     ap.add_argument("--research-minutes", type=float, default=30.0)
@@ -136,12 +138,14 @@ def main(argv: list[str] | None = None) -> int:
             net.reflect_interval_blocks = max(1, round(args.reflect_hours * 3600 / args.block_seconds))
         journal = None
         if not args.no_journal:
-            journal = Journal(args.journal, record_plaintext=args.journal_plaintext == "on")
+            journal = Journal(args.journal, record_plaintext=args.journal_plaintext == "on",
+                              keep_prompts_days=args.journal_keep_prompts_days)
             journal.start_run(f"bridge · {args.provider}", {
                 "provider": args.provider, "model": args.model, "max_calls": args.max_calls,
                 "block_seconds": args.block_seconds, "periods": args.periods})
             journal.attach(net)
-        runtime = NetworkRuntime(net, block_seconds=args.block_seconds)
+        runtime = NetworkRuntime(net, block_seconds=args.block_seconds,
+                                 state_path=ROOT / "data" / "bridge_state.json")
         print(f"trace: {trace_path}", file=sys.stderr)
         print(f"chain replayed: {net.chain_stats}", file=sys.stderr)
         if journal:
