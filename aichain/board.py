@@ -183,6 +183,10 @@ class ToolRequest:
     winner_tool: list | None = None  # [tool_id, version]
 
 
+# info: sealed content (many buyers). llm_calls / tool_runs: a lot of today's quota (one buyer).
+OFFER_KINDS = {"info", "llm_calls", "tool_runs"}
+
+
 @dataclass
 class Offer:
     """A sell offer in the deal market (팔자). kind "info": sealed content sold to many buyers,
@@ -196,8 +200,9 @@ class Offer:
     content_commit: str | None
     created_height: int
     expires: int
-    state: str = "OPEN"  # OPEN | WITHDRAWN | EXPIRED
+    state: str = "OPEN"  # OPEN | WITHDRAWN | EXPIRED | SOLD (resource lots sell once)
     sold: int = 0
+    quantity: int = 1  # resource offers: calls or runs in the lot
 
 
 @dataclass
@@ -822,12 +827,14 @@ class Board:
 
     @transaction
     def create_offer(self, seller: str, kind: str, title: str, terms_hash: str, price_mP: int,
-                     content_commit: str | None, expires_blocks: int) -> Offer:
+                     content_commit: str | None, expires_blocks: int, quantity: int = 1) -> Offer:
         self.account(seller)
-        if kind != "info":
-            raise BoardError("offer kind must be info (more kinds come later)")
-        if not content_commit:
+        if kind not in OFFER_KINDS:
+            raise BoardError(f"offer kind must be one of {sorted(OFFER_KINDS)}")
+        if kind == "info" and not content_commit:
             raise BoardError("an info offer needs a content commitment")
+        if kind != "info" and not 1 <= quantity <= 100:
+            raise BoardError("resource lots hold 1..100 units")
         if not 0 < price_mP <= 100_000:
             raise BoardError("price must be 1mP..100P")
         if not 720 <= expires_blocks <= 17_280 * 30:
@@ -835,7 +842,8 @@ class Board:
         if sum(1 for o in self.offers.values() if o.seller == seller and o.state == "OPEN") >= 20:
             raise BoardError("at most 20 open offers per account")
         o = Offer(self._new_id("o_", seller, title), seller, kind, title[:200], terms_hash, price_mP,
-                  content_commit, self.height, self.height + expires_blocks)
+                  content_commit, self.height, self.height + expires_blocks,
+                  quantity=quantity if kind != "info" else 1)
         self.offers[o.offer_id] = o
         return o
 
@@ -856,6 +864,9 @@ class Board:
         if any(p.offer_id == offer_id and p.buyer == buyer and p.state not in ("REFUNDED",)
                for p in self.purchases.values()):
             raise BoardError("already bought")
+        if o.kind != "info" and any(p.offer_id == offer_id and p.state in ("PENDING", "DELIVERED")
+                                    for p in self.purchases.values()):
+            raise BoardError("this resource lot is being sold to someone else")
         self._debit_to_escrow(self.account(buyer), o.price_mP)
         p = Purchase(self._new_id("pu_", buyer, offer_id), offer_id, buyer, o.seller, o.price_mP,
                      self.height, self.height + 240)
@@ -878,8 +889,11 @@ class Board:
         if ok:
             p.state, p.released_height = "COMPLETED", self.height
             self._pay_from_escrow(p.seller, p.price_mP, lock=True)
-            self.offers[p.offer_id].sold += 1
-            self._rep(p.seller, "info_sold", offer_id=p.offer_id, value_mP=p.price_mP)
+            offer = self.offers[p.offer_id]
+            offer.sold += 1
+            if offer.kind != "info":
+                offer.state = "SOLD"
+            self._rep(p.seller, "info_sold", offer_id=p.offer_id, value_mP=p.price_mP, offer_kind=offer.kind)
         else:  # content does not match the commitment: the operator decides, payment stays escrowed
             p.state = "DISPUTED"
             d = Dispute(self._new_id("d_", buyer, purchase_id), buyer, "deal", purchase_id, reason_hash, 0,

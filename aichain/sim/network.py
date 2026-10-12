@@ -116,6 +116,20 @@ class Network:
         seller, buyer = self.nodes.get(pu.seller), self.nodes.get(pu.buyer)
         if seller is None or buyer is None:
             return None
+        if offer.kind != "info":  # quota rental: the gateway moves today's allowance
+            try:
+                self.gateway.transfer_quota(offer.kind, pu.seller, pu.buyer, offer.quantity)
+            except Exception as e:  # seller used the quota meanwhile: refunded at the deadline
+                self.log("core", "rental_failed", purchase_id=purchase_id, reason=str(e)[:200])
+                return None
+            self.board.deliver_offer(pu.seller, purchase_id, f"quota:{offer.kind}:{offer.quantity}")
+            reason = self.put_content({"check": "quota transferred", "kind": offer.kind,
+                                       "quantity": offer.quantity}, author="core")
+            self.board.confirm_delivery(pu.buyer, purchase_id, True, reason)
+            self.log("core", "purchase_delivered", purchase_id=purchase_id, offer_id=offer.offer_id,
+                     seller=pu.seller, buyer=pu.buyer, price=pu.price_mP / 1000, verified=True,
+                     kind=offer.kind, quantity=offer.quantity)
+            return None
         plaintext = seller.private.get(f"offer:{offer.offer_id}")
         if plaintext is None:
             return None  # cannot deliver; the buyer is refunded at the deadline

@@ -178,6 +178,10 @@ class PersonaEditArgs(BaseModel):
 
 
 class OfferCreateArgs(BaseModel):
+    kind: Literal["info", "llm_calls", "tool_runs"] = Field(
+        default="info", description="info: 정보 판매. llm_calls: 오늘 남은 LLM 호출 할당량 임대. "
+                                    "tool_runs: 오늘 남은 도구 실행 할당량 임대")
+    quantity: int = Field(default=1, ge=1, le=100, description="임대하는 호출·실행 횟수 (llm_calls, tool_runs)")
     title: str = Field(max_length=200)
     summary: str = Field(max_length=1000, description="공개되는 요약. 본문이 이와 다르면 분쟁에서 진다")
     note_topic: str | None = Field(default=None, description="내 지식 노트 주제를 팔 때 (본문 대신)")
@@ -268,9 +272,10 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "tool_activate": (ToolActivateArgs, "테스트를 통과한 버전을 활성화한다. 실패한 업데이트는 current를 바꾸지 않는다."),
     "tool_run": (ToolRunArgs, "활성화된 내 도구, 또는 라이선스를 산 다른 노드의 도구를 실행한다. "
                               "남의 도구는 호출마다 사용료가 나간다. 결과는 <data source=\"tool:...\">다."),
-    "offer_create": (OfferCreateArgs, "정보를 판매 등록한다(지식 노트나 직접 쓴 본문). 요약만 공개되고 본문은 구매자에게만 "
-                                      "종단간 암호화로 전달된다. 같은 정보를 여러 노드에 팔 수 있다."),
-    "offers": (OffersArgs, "판매 중인 정보 목록: 제목, 요약, 가격, 판매 수, 판매자 평판."),
+    "offer_create": (OfferCreateArgs, "판매 등록. info: 정보(지식 노트나 직접 쓴 본문) — 요약만 공개되고 본문은 구매자에게만 "
+                                      "종단간 암호화로 전달, 여러 노드에 팔 수 있다. llm_calls·tool_runs: 오늘 남은 "
+                                      "LLM 호출·도구 실행 할당량을 묶어 임대(한 노드에게, 오늘 자정 UTC까지)."),
+    "offers": (OffersArgs, "판매 중인 정보·할당량 목록: 종류, 제목, 요약, 수량, 가격, 판매 수, 판매자 평판."),
     "offer_buy": (OfferBuyArgs, "정보를 산다. 대금은 에스크로를 거쳐 판매자에게 가고, 본문이 바로 복호화되어 내 기억에 저장된다. "
                                 "요약과 다르면 분쟁 기간 안에 dispute(target_kind='deal')."),
     "offer_withdraw": (OfferWithdrawArgs, "내 판매 등록을 내린다(이미 판 것은 유지)."),

@@ -300,7 +300,10 @@ def network_snapshot(net: Any) -> dict[str, Any]:
                            "submissions": len(r.submissions), "winner": r.winner}
                           for r in board.tool_requests.values()],
         "offers": [{"offer_id": o.offer_id, "seller": o.seller, "title": o.title, "state": o.state,
-                    "price": fmt_P(o.price_mP), "sold": o.sold} for o in board.offers.values()],
+                    "price": fmt_P(o.price_mP), "sold": o.sold, "kind": o.kind, "quantity": o.quantity}
+                   for o in board.offers.values()],
+        "quotas": {n: {"llm_calls": net.gateway.remaining(n, "llm_calls"),
+                       "tool_runs": net.gateway.remaining(n, "tool_runs")} for n in net.nodes},
         "tools": [{"tool_id": t.tool_id, "version": t.version, "author": t.author,
                    "price_install": fmt_P(t.price_install_mP), "price_call": fmt_P(t.price_call_mP),
                    "sold": sum(1 for (_, tid, v) in board.licenses if tid == t.tool_id and v == t.version),

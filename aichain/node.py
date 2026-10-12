@@ -297,8 +297,10 @@ class Node:
             f"- 평판 {self.net.reputation(self.id).value:.2f}\n"
             f"- 다른 노드 평판: {self._peer_reputations()}\n"
             f"- LLM 예산 {self.bucket.remaining()} 토큰, 상태 {self.bucket.state}\n"
+            f"- 오늘 남은 할당량: LLM 호출 {self.net.gateway.remaining(self.id, 'llm_calls') if self.net.gateway.remaining(self.id, 'llm_calls') is not None else '제한 없음'}, "
+            f"도구 실행 {self.net.gateway.remaining(self.id, 'tool_runs')} (offers로 사고팔 수 있다)\n"
             f"- 내가 판정할 현상금 {len(to_judge)}개\n"
-            f"- 판매 중인 정보 {sum(1 for o in board.offers.values() if o.state == 'OPEN' and o.seller != self.id)}개 (offers로 보기)\n\n"
+            f"- 판매 중인 정보·할당량 {sum(1 for o in board.offers.values() if o.state == 'OPEN' and o.seller != self.id)}개 (offers로 보기)\n\n"
             "### 열린 현상금\n"
             f"{self._state_text('bounties')}\n\n"
             "## 이 프로토타입에서 쓸 수 있는 도구\n"
@@ -673,6 +675,10 @@ class Node:
                 listing = board.tools[(args.tool_id, version)]
                 self.policy.check_spend(listing.price_call_mP, acct.available_mP, h, bounty=False)
             try:
+                self.net.gateway.take_tool_run(self.id)
+            except CallLimitReached as e:
+                raise BoardError(f"{e}. 다른 노드에게서 tool_runs 할당량을 살 수 있다(offers).") from e
+            try:
                 out = ws.run(self.id, args.tool_id, args.input, version)
             except WorkshopError as e:
                 raise BoardError(str(e)) from e
@@ -750,6 +756,20 @@ class Node:
             self.net.log(self.id, "rated", subject=args.subject, score=args.score,
                          context_ref=args.context_ref, comment=args.comment[:200])
             return f"{args.subject}를 {args.score:+d}로 평가함 ({r.rating_id})"
+        if isinstance(args, OfferCreateArgs) and args.kind != "info":
+            left = self.net.gateway.remaining(self.id, args.kind)
+            if left is not None and left < args.quantity:
+                raise BoardError(f"오늘 남은 {args.kind}이 {left}개뿐이다")
+            terms_hash = self.net.put_content({"title": args.title, "summary": args.summary,
+                                               "kind": args.kind, "quantity": args.quantity,
+                                               "valid": "until 00:00 UTC"}, author=self.id)
+            offer = board.create_offer(self.id, args.kind, args.title, terms_hash, to_mP(args.price_P), None,
+                                       round(args.expires_hours * 720), args.quantity)
+            self.policy.record_write(0, h)
+            self.net.log(self.id, "offer_created", offer_id=offer.offer_id, title=offer.title,
+                         price=fmt_P(offer.price_mP), kind=args.kind, quantity=args.quantity, chars=0)
+            return (f"할당량 판매 등록 {offer.offer_id}: {args.kind} {args.quantity}개를 {fmt_P(offer.price_mP)}에 "
+                    "(오늘 자정 UTC까지 유효)")
         if isinstance(args, OfferCreateArgs):
             if args.note_topic:
                 note = self.memory.latest_note(args.note_topic)
@@ -783,7 +803,8 @@ class Node:
                     continue
                 mine = any(pu.offer_id == o.offer_id and pu.buyer == self.id and pu.state != "REFUNDED"
                            for pu in board.purchases.values())
-                rows.append(f"- {o.offer_id}{'(구매함)' if mine else ''}: {o.title} | {fmt_P(o.price_mP)} | "
+                what_ = "정보" if o.kind == "info" else f"{o.kind} {o.quantity}개"
+                rows.append(f"- {o.offer_id}{'(구매함)' if mine else ''} [{what_}]: {o.title} | {fmt_P(o.price_mP)} | "
                             f"판매자 {o.seller} 평판 {self.net.reputation(o.seller).value:.2f} | 판매 {o.sold} | "
                             f"요약: {terms.get('summary', '')[:200]}")
             return Prewrapped(data_block("market", "\n".join(rows) or "(판매 중인 정보 없음)"))
@@ -792,9 +813,16 @@ class Node:
             if offer is None:
                 raise BoardError("unknown offer")
             self.policy.check_spend(offer.price_mP, acct.available_mP, h, bounty=False)
+            if offer.kind != "info":
+                left = self.net.gateway.remaining(offer.seller, offer.kind)
+                if left is not None and left < offer.quantity:
+                    raise BoardError(f"판매자에게 오늘 남은 {offer.kind}이 {left}개뿐이라 이 묶음을 팔 수 없다")
             pu = board.buy_offer(self.id, args.offer_id)
             self.policy.record_write(offer.price_mP, h)
             plaintext = self.net.complete_purchase(pu.purchase_id)
+            if offer.kind != "info" and pu.state == "COMPLETED":
+                return (f"임대 완료: {offer.kind} {offer.quantity}개를 받았다(오늘 자정 UTC까지). "
+                        f"오늘 남은 {offer.kind}: {self.net.gateway.remaining(self.id, offer.kind)}")
             if plaintext is None:
                 return f"구매 {pu.purchase_id}: 판매자 전달을 기다린다(마감 블록 {pu.deliver_until}, 못 받으면 환불)"
             return Prewrapped(data_block(f"deal:{offer.seller}", plaintext[:8000],

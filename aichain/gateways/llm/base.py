@@ -173,6 +173,7 @@ class GatewayConfig:
     daily_calls_total: int | None = None  # per UTC day, all nodes
     # Persist daily counters here so restarts cannot reset the caps.
     usage_path: str | None = None
+    daily_tool_runs_per_node: int | None = 40  # compute quota (isolated tool executions)
 
 
 class LLMGateway:
@@ -194,7 +195,9 @@ class LLMGateway:
         self._sleep = sleep
         self._rng = rng or random.Random(0)
         self.calls = 0
-        self._daily: dict[tuple[str, str], int] = {}  # (utc date, node | "*") -> calls
+        self._daily: dict[tuple[str, str], int] = {}  # (utc date, node | "*" | "node#tool_runs") -> uses
+        # Quota moved between nodes by rental deals today: (utc date, key) -> cap adjustment.
+        self._adjust: dict[tuple[str, str], int] = {}
         self._load_usage()
         self.log: list[dict[str, Any]] = []
         # Called after every provider call: (request, response | None, info). The journal
@@ -210,8 +213,8 @@ class LLMGateway:
             raise BudgetExhausted(f"{request.node_id}: budget {bucket.state}")
         if self.config.max_calls is not None and self.calls >= self.config.max_calls:
             raise CallLimitReached(f"gateway call cap {self.config.max_calls} reached")
-        day = time.strftime("%Y-%m-%d", time.gmtime())
-        node_cap, total_cap = self.config.daily_calls_per_node, self.config.daily_calls_total
+        day = _today()
+        node_cap, total_cap = self.node_cap(request.node_id, "llm_calls"), self.config.daily_calls_total
         if node_cap is not None and self._daily.get((day, request.node_id), 0) >= node_cap:
             raise CallLimitReached(f"{request.node_id}: daily call cap {node_cap} reached")
         if total_cap is not None and self._daily.get((day, "*"), 0) >= total_cap:
@@ -267,6 +270,7 @@ class LLMGateway:
             with open(path, encoding="utf-8") as f:
                 raw = json.load(f)
             self._daily = {(raw["day"], k): v for k, v in raw.get("calls", {}).items()}
+            self._adjust = {(raw["day"], k): v for k, v in raw.get("adjust", {}).items()}
 
     def _save_usage(self, day: str) -> None:
         import json
@@ -276,25 +280,70 @@ class LLMGateway:
         if not path:
             return
         calls = {k: v for (d, k), v in self._daily.items() if d == day}
+        adjust = {k: v for (d, k), v in self._adjust.items() if d == day}
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"day": day, "calls": calls}, f)
+            json.dump({"day": day, "calls": calls, "adjust": adjust}, f)
         os.replace(tmp, path)
 
+    # ---- per-node daily quotas (LLM calls, tool runs) and rentals ----
+
+    @staticmethod
+    def _key(node_id: str, kind: str) -> str:
+        return node_id if kind == "llm_calls" else f"{node_id}#{kind}"
+
+    def node_cap(self, node_id: str, kind: str) -> int | None:
+        base = (self.config.daily_calls_per_node if kind == "llm_calls"
+                else self.config.daily_tool_runs_per_node if kind == "tool_runs" else None)
+        if base is None:
+            return None
+        return base + self._adjust.get((_today(), self._key(node_id, kind)), 0)
+
+    def remaining(self, node_id: str, kind: str) -> int | None:
+        cap = self.node_cap(node_id, kind)
+        if cap is None:
+            return None
+        return max(0, cap - self._daily.get((_today(), self._key(node_id, kind)), 0))
+
+    def take_tool_run(self, node_id: str) -> None:
+        left = self.remaining(node_id, "tool_runs")
+        if left is not None and left <= 0:
+            raise CallLimitReached(f"{node_id}: daily tool-run quota used up")
+        day, key = _today(), self._key(node_id, "tool_runs")
+        self._daily[(day, key)] = self._daily.get((day, key), 0) + 1
+        self._save_usage(day)
+
+    def transfer_quota(self, kind: str, seller: str, buyer: str, amount: int) -> None:
+        """Rental: move `amount` of today's unused quota from seller to buyer (network total unchanged)."""
+        left = self.remaining(seller, kind)
+        if left is None:
+            raise CallLimitReached(f"{kind} has no per-node quota to rent")
+        if left < amount:
+            raise CallLimitReached(f"{seller} has only {left} {kind} left today")
+        day = _today()
+        for node, delta in ((seller, -amount), (buyer, amount)):
+            key = (day, self._key(node, kind))
+            self._adjust[key] = self._adjust.get(key, 0) + delta
+        self._save_usage(day)
+
     def has_daily_room(self, node_id: str) -> bool:
-        day = time.strftime("%Y-%m-%d", time.gmtime())
-        node_cap, total_cap = self.config.daily_calls_per_node, self.config.daily_calls_total
+        day = _today()
+        node_cap, total_cap = self.node_cap(node_id, "llm_calls"), self.config.daily_calls_total
         if node_cap is not None and self._daily.get((day, node_id), 0) >= node_cap:
             return False
         return not (total_cap is not None and self._daily.get((day, "*"), 0) >= total_cap)
 
     def daily_usage(self) -> dict[str, int]:
-        day = time.strftime("%Y-%m-%d", time.gmtime())
+        day = _today()
         return {k: v for (d, k), v in self._daily.items() if d == day}
 
     def _notify(self, request: LLMRequest, resp: LLMResponse | None, info: dict[str, Any]) -> None:
         for observer in self.observers:
             observer(request, resp, info)
+
+
+def _today() -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime())
 
 
 def _ms(started: float) -> int:

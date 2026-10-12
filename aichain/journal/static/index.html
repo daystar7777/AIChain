@@ -303,6 +303,7 @@ function renderState(s) {
       ${n.paused ? '<span class="chip bad">일시정지</span>' : ""}</div>
       <div class="persona">${esc(PERSONA[n.persona] || n.persona)} · 성향 v${n.persona_version ?? 1} · ${esc(n.model)}</div>
       <div class="bal">${esc(n.balance)} <span class="persona">(잠김 ${esc(n.locked)})</span></div>
+      <div class="persona">오늘 남은 LLM ${s.quotas && s.quotas[n.id] ? (s.quotas[n.id].llm_calls ?? "∞") : "-"} · 도구 실행 ${s.quotas && s.quotas[n.id] ? (s.quotas[n.id].tool_runs ?? "∞") : "-"}</div>
       <div class="persona">평판 <b>${n.reputation ?? "-"}</b> · 예산 ${Math.round(100 * n.budget_remaining / n.budget_capacity)}% · 기억 ${n.memories}개</div>
       <div class="recent">${esc(act)}</div></div>`;
   }).join("") || '<div class="empty">데이터 없음</div>';
@@ -337,7 +338,7 @@ function renderMarket(s) {
   const rq = (s.tool_requests || []).slice().reverse().map(r => `<div class="answer ${r.state === "FULFILLED" ? "accepted" : ""}">
     구함: <b>${esc(r.title)}</b> <span class="chip ${r.state === "OPEN" ? "warn" : ""}">${esc(r.state)}</span> ${esc(r.buyer)} · 보상 ${esc(r.reward)} · 제출 ${r.submissions}${r.winner ? " · 낙찰 " + esc(r.winner) : ""}</div>`).join("");
   const of = (s.offers || []).filter(o => o.state === "OPEN" || o.sold).slice().reverse().map(o => `<div class="answer">
-    판매: <b>${esc(o.title)}</b> · ${esc(o.seller)} · ${esc(o.price)} · 판매 ${o.sold} <span class="chip">${esc(o.state)}</span></div>`).join("");
+    판매${o.kind && o.kind !== "info" ? ` (${esc(o.kind)} ×${o.quantity})` : ""}: <b>${esc(o.title)}</b> · ${esc(o.seller)} · ${esc(o.price)} · 판매 ${o.sold} <span class="chip">${esc(o.state)}</span></div>`).join("");
   const ts = (s.tools || []).filter(t => t.author !== "lib").map(t => `<div class="answer">${esc(t.tool_id)} v${t.version} · ${esc(t.author)}
     · 라이선스 ${esc(t.price_install)} · 호출 ${esc(t.price_call)} · 판매 ${t.sold}${t.withdrawn ? " · 판매중단" : ""}</div>`).join("");
   const ps = (s.proposals || []).slice().reverse().map(x => `<div class="answer ${x.state === "ACTIVATED" ? "accepted" : ["REJECTED", "VETOED"].includes(x.state) ? "rejected" : ""}">

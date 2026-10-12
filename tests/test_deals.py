@@ -123,3 +123,51 @@ def test_encrypted_end_to_end_sale_between_nodes(tmp_path):
     again = build_network("scripted", chain=ChainStore(tmp_path / "c.db"))
     assert again.nodes["n4"].private[f"offer:{next(iter(again.board.offers))}"] == SECRET
     assert next(iter(again.board.offers.values())).sold == 1
+
+
+def test_quota_rental_moves_todays_allowance():
+    def brain(request):
+        tools = [m for m in request.messages if m.role == "tool"]
+        user = next(m.content for m in reversed(request.messages) if m.role == "user")
+        if "idle_tick" not in user:
+            return persona_brain(request)
+        if tools:
+            return tool_response(("done", {"summary": "ok"}))
+        if request.node_id == "n2":
+            return tool_response(("offer_create", {"kind": "llm_calls", "quantity": 10, "title": "LLM 호출 10회",
+                                                   "summary": "오늘 쓰지 않을 호출", "price_P": 2}))
+        return tool_response(("offer_buy", {"offer_id": next(iter(net_ref["net"].board.offers))}))
+
+    net = build_network("scripted", brain=brain, daily_calls_per_node=50)
+    net_ref["net"] = net
+    gw = net.gateway
+    net.nodes["n2"].enqueue("idle_tick", {})
+    net.run_until_idle()
+    before_n1, before_n2 = gw.remaining("n1", "llm_calls"), gw.remaining("n2", "llm_calls")
+    net.nodes["n1"].enqueue("idle_tick", {})
+    net.run_until_idle()
+    (pu,) = net.board.purchases.values()
+    offer = net.board.offers[pu.offer_id]
+    assert pu.state == "COMPLETED" and offer.state == "SOLD"
+    assert gw.remaining("n2", "llm_calls") == before_n2 - 10
+    assert gw.remaining("n1", "llm_calls") == before_n1 - 2 + 10  # its own two calls, plus the lot
+    assert gw.node_cap("n1", "llm_calls") == 60 and gw.node_cap("n2", "llm_calls") == 40
+    assert net.board.accounts["n2"].locked_mP == 2000 and net.board.total_supply_check()
+    with pytest.raises(BoardError):
+        net.board.buy_offer("n3", offer.offer_id)  # a lot sells once
+
+
+def test_quota_transfer_rules_and_persistence(tmp_path):
+    from aichain.gateways.llm.base import CallLimitReached, GatewayConfig, LLMGateway
+
+    path = str(tmp_path / "u.json")
+    gw = LLMGateway({}, GatewayConfig(daily_calls_per_node=5, daily_tool_runs_per_node=3, usage_path=path))
+    gw.transfer_quota("tool_runs", "a", "b", 2)
+    with pytest.raises(CallLimitReached):
+        gw.transfer_quota("tool_runs", "a", "b", 2)  # only 1 left
+    for _ in range(5):
+        gw.take_tool_run("b")
+    with pytest.raises(CallLimitReached):
+        gw.take_tool_run("b")
+    again = LLMGateway({}, GatewayConfig(daily_calls_per_node=5, daily_tool_runs_per_node=3, usage_path=path))
+    assert again.remaining("a", "tool_runs") == 1 and again.remaining("b", "tool_runs") == 0

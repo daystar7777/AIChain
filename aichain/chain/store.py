@@ -28,7 +28,7 @@ from aichain.chain.errors import ChainHalted
 
 CHAIN_ID = "aichain-dev-1"
 ROOT_ACCOUNT = "root"
-ROOT_VERSION = "v9"  # bump when the state-root definition changes
+ROOT_VERSION = "v10"  # bump when the state-root definition changes
 ROOT_CHECK_EVERY = 120
 CHECKPOINT_EVERY = ROOT_CHECK_EVERY  # kept for callers/tests
 VALID_FOR_BLOCKS = 120_960
