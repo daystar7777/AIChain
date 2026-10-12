@@ -131,3 +131,19 @@ def test_journal_drops_old_prompts_but_keeps_responses(tmp_path):
     rows = {k: json.loads(d) for k, d in connect(tmp_path / "j.db").execute("SELECT kind, data FROM entries")}
     assert "messages" not in rows["llm_call"] and rows["llm_call"]["messages_pruned"] is True
     assert rows["llm_call"]["response"] == {"text": "ok"} and rows["tool"] == {"tool": "x"}
+
+
+def test_operator_can_queue_a_tick(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from aichain.bridge.runtime import NetworkRuntime
+    from aichain.bridge.server import create_app
+    from aichain.bridge.tokens import TokenStore
+
+    net = build_network("scripted")
+    c = TestClient(create_app(NetworkRuntime(net), TokenStore.load(tmp_path / "t.json"), admin_token="adm"),
+                   headers={"Authorization": "Bearer adm"})
+    assert c.post("/admin/v1/nodes/n2/tick", json={"kind": "economy_tick"}).json() == {"queued": "economy_tick"}
+    assert net.nodes["n2"].has_pending
+    assert c.post("/admin/v1/nodes/zz/tick", json={"kind": "economy_tick"}).status_code == 404
+    assert c.post("/admin/v1/nodes/n2/tick", json={"kind": "transfer"}).status_code == 422

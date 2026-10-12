@@ -17,7 +17,7 @@ import asyncio
 import hmac
 import json
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, AsyncIterator
+from typing import Annotated, Any, AsyncIterator, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -294,6 +294,22 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
             except KeyError as e:
                 raise HTTPException(404, str(e)) from e
             return {"queued": True}
+        return runtime.call(fn)
+
+    class TickIn(BaseModel):
+        kind: Literal["economy_tick", "research_tick", "reflect"]
+
+    @app.post("/admin/v1/nodes/{node_id}/tick", dependencies=[Depends(operator)])
+    def tick_node(node_id: str, body: TickIn) -> dict[str, Any]:
+        """Queue a scheduled event now (operator check that a node handles it), within its quota."""
+        def fn(net: Any) -> dict[str, Any]:
+            node = net.nodes.get(node_id)
+            if node is None:
+                raise HTTPException(404, f"no node {node_id}")
+            if not net.gateway.has_daily_room(node_id):
+                raise HTTPException(409, f"{node_id} has no LLM calls left today")
+            node.enqueue(body.kind, {})
+            return {"queued": body.kind}
         return runtime.call(fn)
 
     @app.get("/admin/v1/status", dependencies=[Depends(operator)])
