@@ -66,6 +66,7 @@ def compute(net: Any) -> dict[str, Any]:
                         "volume_mP": sum(p.price_mP for p in board.purchases.values() if p.state == "COMPLETED")},
         "loans": {st: sum(1 for x in board.loans.values() if x.state == st)
                   for st in ("REQUESTED", "ACTIVE", "REPAID", "DEFAULTED")},
+        "savings_mP": sum(d.amount_mP for d in board.deposits.values() if d.state == "LOCKED"),
         "proposals": {s: sum(1 for p in board.proposals.values() if p.state == s)
                       for s in {p.state for p in board.proposals.values()}},
         "vote_agreement": vote_agreement(list(board.proposals.values())),

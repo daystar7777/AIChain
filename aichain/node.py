@@ -60,6 +60,7 @@ from aichain.mastermind.tools import (
     SubscriptionsArgs,
     RecallArgs,
     RememberArgs,
+    SavingsArgs,
     SearchArgs,
     ToolActivateArgs,
     ToolDevArgs,
@@ -959,6 +960,25 @@ class Node:
             board.cancel_loan_request(self.id, args.loan_id)
             self.policy.record_write(0, h)
             return f"{args.loan_id} 요청 취소, 담보 반환"
+        if isinstance(args, SavingsArgs):
+            if args.action == "deposit":
+                if args.amount_P is None or args.term_hours is None:
+                    raise BoardError("deposit에는 amount_P와 term_hours가 필요하다")
+                dep = board.deposit_savings(self.id, to_mP(args.amount_P), round(args.term_hours * 720))
+                self.policy.record_write(0, h)
+                self.net.log(self.id, "savings_deposit", deposit_id=dep.deposit_id, amount=fmt_P(dep.amount_mP),
+                             unlock=dep.unlock)
+                return f"예금 {dep.deposit_id}: {fmt_P(dep.amount_mP)}, 만기 블록 {dep.unlock}"
+            if args.action == "withdraw":
+                if not args.deposit_id:
+                    raise BoardError("deposit_id가 필요하다")
+                dep = board.withdraw_savings(self.id, args.deposit_id)
+                self.policy.record_write(0, h)
+                return f"{dep.deposit_id} 중도 해지: 원금 {fmt_P(dep.amount_mP)} 반환, 이자 {fmt_P(dep.earned_mP)} 몰수"
+            rows = [f"- {d.deposit_id} [{d.state}] {fmt_P(d.amount_mP)}, 쌓인 이자 {fmt_P(d.earned_mP)}, 만기 #{d.unlock}"
+                    for d in board.deposits.values() if d.owner == self.id]
+            total = sum(d.amount_mP for d in board.deposits.values() if d.state == "LOCKED")
+            return ("\n".join(rows) or "(내 예금 없음)") + f"\n네트워크 전체 예치액 {fmt_P(total)}"
         if isinstance(args, OfferWithdrawArgs):
             board.withdraw_offer(self.id, args.offer_id)
             self.policy.record_write(0, h)

@@ -171,3 +171,24 @@ def test_quota_transfer_rules_and_persistence(tmp_path):
         gw.take_tool_run("b")
     again = LLMGateway({}, GatewayConfig(daily_calls_per_node=5, daily_tool_runs_per_node=3, usage_path=path))
     assert again.remaining("a", "tool_runs") == 1 and again.remaining("b", "tool_runs") == 0
+
+
+@pytest.mark.parametrize("plaintext", [True, False])
+def test_journal_plaintext_setting(tmp_path, plaintext):
+    import sqlite3
+
+    from aichain.journal.store import Journal
+
+    net = build_network("scripted", brain=seller_buyer_brain)
+    net_ref["net"] = net
+    journal = Journal(tmp_path / "j.db", record_plaintext=plaintext)
+    journal.start_run("t", {})
+    journal.attach(net)
+    for nid in ("n4", "n1"):
+        net.nodes[nid].enqueue("idle_tick", {})
+        net.run_until_idle()
+    journal.close()
+    rows = "\n".join(r[0] for r in sqlite3.connect(tmp_path / "j.db").execute("SELECT data FROM entries"))
+    assert (SECRET in rows) is plaintext
+    if not plaintext:
+        assert "deal content withheld" in rows

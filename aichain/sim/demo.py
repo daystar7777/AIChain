@@ -58,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--journal", type=Path, default=ROOT / "data" / "journal" / "journal.db",
                     help="journal database for the web viewer")
     ap.add_argument("--no-journal", action="store_true")
+    ap.add_argument("--journal-plaintext", choices=["on", "off"], default="on",
+                    help="keep traded information bodies in the journal (development; turn off later)")
     ap.add_argument("--scenario", choices=["bounty", "research", "both"], default="bounty",
                     help="bounty: one bridge question; research: one research episode per node")
     ap.add_argument("--research-nodes", default=None, help="comma-separated nodes that research (default all)")
@@ -101,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         journal = None
         if not args.no_journal:
-            journal = Journal(args.journal)
+            journal = Journal(args.journal, record_plaintext=args.journal_plaintext == "on")
             journal.start_run(f"demo · {args.provider}", {
                 "provider": args.provider, "model": args.model, "max_calls": max_calls,
                 "params": vars(params)})

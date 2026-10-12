@@ -17,7 +17,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from aichain.common import fmt_P
+from aichain.common import fmt_P, sha256_hex
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -67,6 +67,33 @@ _ALLOWED_KEYS = {"input_tokens", "output_tokens", "weighted_tokens", "tokens", "
                  "max_episode_tokens"}
 
 
+_DEAL_BLOCK = re.compile(r'(<data source="deal:[^"]*"[^>]*>\n)(.*?)(\n</data>)', re.S)
+
+
+def strip_deal_content(value: Any) -> Any:
+    """Replace purchased/sold information bodies with a hash (production setting)."""
+    if isinstance(value, dict):
+        if value.get("name") == "offer_create" and isinstance(value.get("arguments"), str):
+            try:  # the model's own tool call carries the seller's text as a JSON string
+                args = json.loads(value["arguments"])
+                value = {**value, "arguments": json.dumps(strip_deal_content(args), ensure_ascii=False)}
+            except ValueError:
+                pass
+        out = {}
+        for k, v in value.items():
+            if k == "content" and isinstance(v, str) and value.get("kind") in (None, "info") and "price_P" in value:
+                out[k] = f"[deal content withheld: sha256 {sha256_hex(v)[:16]}, {len(v)} chars]"
+            else:
+                out[k] = strip_deal_content(v)
+        return out
+    if isinstance(value, list):
+        return [strip_deal_content(v) for v in value]
+    if isinstance(value, str) and "deal:" in value:
+        return _DEAL_BLOCK.sub(lambda m: m.group(1) + f"[deal content withheld: sha256 {sha256_hex(m.group(2))[:16]}, "
+                               f"{len(m.group(2))} chars]" + m.group(3), value)
+    return value
+
+
 def redact(value: Any) -> Any:
     if is_dataclass(value) and not isinstance(value, type):
         value = asdict(value)
@@ -104,8 +131,11 @@ class Journal:
 
     METRICS_EVERY_BLOCKS = 60  # 5 minutes at 5 s/block
 
-    def __init__(self, path: Path, snapshot_interval: float = 0.5) -> None:
+    def __init__(self, path: Path, snapshot_interval: float = 0.5, record_plaintext: bool = True) -> None:
+        """record_plaintext: keep the bodies of traded information in the journal (development).
+        Off: they are replaced by a hash before anything is written."""
         self.path = path
+        self.record_plaintext = record_plaintext
         self._conn = connect(path)
         self._lock = threading.Lock()
         self._snapshot_interval = snapshot_interval
@@ -145,7 +175,8 @@ class Journal:
                height: int | None = None, episode: str | None = None) -> None:
         if self.run_id is None:
             raise RuntimeError("start_run first")
-        payload = json.dumps(redact(data), ensure_ascii=False, default=str)
+        clean = redact(data) if self.record_plaintext else strip_deal_content(redact(data))
+        payload = json.dumps(clean, ensure_ascii=False, default=str)
         with self._lock:
             self._conn.execute(
                 "INSERT INTO entries (run_id, ts, height, node, kind, episode, data) "

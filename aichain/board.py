@@ -259,6 +259,19 @@ class Loan:
 
 
 @dataclass
+class Deposit:
+    """Fixed-term savings (저축). Earns a share of each epoch's savings pool (10% of issuance) pro
+    rata to the amount; paid out with the principal at maturity; early withdrawal forfeits it."""
+    deposit_id: str
+    owner: str
+    amount_mP: int
+    created_height: int
+    unlock: int
+    state: str = "LOCKED"  # LOCKED | MATURED | WITHDRAWN_EARLY
+    earned_mP: int = 0
+
+
+@dataclass
 class ToolListing:
     tool_id: str
     version: int
@@ -328,6 +341,7 @@ class Board:
         self.purchases: dict[str, Purchase] = {}
         self.subscriptions: dict[str, Subscription] = {}
         self.loans: dict[str, Loan] = {}
+        self.deposits: dict[str, Deposit] = {}
         self.ratings: dict[str, Rating] = {}
         self.licenses: set[tuple[str, str, int]] = set()  # (account, tool_id, version)
 
@@ -372,6 +386,7 @@ class Board:
             "purchases": {k: asdict(v) for k, v in sorted(self.purchases.items())},
             "subscriptions": {k: asdict(v) for k, v in sorted(self.subscriptions.items())},
             "loans": {k: asdict(v) for k, v in sorted(self.loans.items())},
+            "deposits": {k: asdict(v) for k, v in sorted(self.deposits.items())},
         }
         return sha256_hex(canonical_json(state))
 
@@ -1067,6 +1082,32 @@ class Board:
             self._rep(loan.borrower, "loan_default", loan_id=loan.loan_id, owed_mP=owed,
                       recovered_mP=loan.collateral_mP)
 
+    # ---- savings ----
+
+    @transaction
+    def deposit_savings(self, owner: str, amount_mP: int, term_blocks: int) -> Deposit:
+        if amount_mP < 1000:
+            raise BoardError("deposit at least 1P")
+        if not 720 <= term_blocks <= 17_280 * 30:
+            raise BoardError("term must be 1 hour..30 days")
+        if sum(1 for d in self.deposits.values() if d.owner == owner and d.state == "LOCKED") >= 10:
+            raise BoardError("at most 10 open deposits")
+        self._debit_to_escrow(self.account(owner), amount_mP)
+        dep = Deposit(self._new_id("sv_", owner, amount_mP), owner, amount_mP, self.height,
+                      self.height + term_blocks)
+        self.deposits[dep.deposit_id] = dep
+        return dep
+
+    @transaction
+    def withdraw_savings(self, owner: str, deposit_id: str) -> Deposit:
+        dep = self.deposits.get(deposit_id)
+        if dep is None or dep.owner != owner or dep.state != "LOCKED":
+            raise BoardError("no locked deposit of yours with that id")
+        self._pay_from_escrow(owner, dep.amount_mP, lock=False)
+        self._burn_from_escrow(dep.earned_mP)  # early: the interest is forfeited
+        dep.state = "WITHDRAWN_EARLY"
+        return dep
+
     # ---- tool buy orders ----
 
     @transaction
@@ -1195,6 +1236,12 @@ class Board:
                 pu.state = "REFUNDED"
                 self._pay_from_escrow(pu.buyer, pu.price_mP, lock=False)
                 events.append(BoardEvent("purchase_refunded", None, {"purchase_id": pu.purchase_id}))
+        for dep in self.deposits.values():
+            if dep.state == "LOCKED" and h >= dep.unlock:
+                self._pay_from_escrow(dep.owner, dep.amount_mP + dep.earned_mP, lock=False)
+                dep.state = "MATURED"
+                events.append(BoardEvent("deposit_matured", None, {"deposit_id": dep.deposit_id,
+                                                                   "owner": dep.owner, "earned_mP": dep.earned_mP}))
         for loan in self.loans.values():
             if loan.state == "ACTIVE" and h >= loan.due:
                 self._settle_loan(loan, at_due=True)
@@ -1238,7 +1285,10 @@ class Board:
         reward = p.epoch_blocks * (p.block_reward_mP >> (start // p.reward_halving_blocks))
         if reward <= 0:
             return None
-        uptime_pool, contrib_pool = reward * 6 // 10, reward - reward * 6 // 10
+        savers = {d.deposit_id: d for d in self.deposits.values() if d.state == "LOCKED"}
+        savings_pool = reward // 10 if savers else 0  # with no deposits the pool is not issued
+        uptime_pool = reward * 55 // 100 if savers else reward * 6 // 10
+        contrib_pool = reward - uptime_pool - (reward // 10 if savers else 0)
         alive = sorted({e["account"] for e in self.rep_events
                         if e["kind"] == "heartbeat" and e.get("epoch") == epoch})
         income: dict[str, int] = {}
@@ -1255,10 +1305,20 @@ class Board:
             for a, inc in sorted(income.items()):
                 share = min(contrib_pool * inc // total_income, contrib_pool // 2)
                 paid[a] = paid.get(a, 0) + share
+        total_saved = sum(d.amount_mP for d in savers.values())
+        saved_paid = 0
+        for dep_id, d in sorted(savers.items()):
+            share = savings_pool * d.amount_mP // total_saved if total_saved else 0
+            d.earned_mP += share  # held in escrow until maturity
+            self.escrow_mP += share
+            self.issued_mP += share
+            saved_paid += share
         for a, amount in paid.items():
             if amount > 0 and a in self.accounts:
                 self.accounts[a].balance_mP += amount
                 self.issued_mP += amount
+        if saved_paid:
+            paid = {**paid, "savings": saved_paid}
         if not paid:
             return None
         return BoardEvent("epoch_issued", None, {"epoch": epoch, "paid": paid})

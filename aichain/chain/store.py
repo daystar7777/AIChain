@@ -28,7 +28,7 @@ from aichain.chain.errors import ChainHalted
 
 CHAIN_ID = "aichain-dev-1"
 ROOT_ACCOUNT = "root"
-ROOT_VERSION = "v13"  # bump when the state-root definition changes
+ROOT_VERSION = "v14"  # bump when the state-root definition changes
 ROOT_CHECK_EVERY = 120
 CHECKPOINT_EVERY = ROOT_CHECK_EVERY  # kept for callers/tests
 VALID_FOR_BLOCKS = 120_960
@@ -44,7 +44,8 @@ SENDER_FIELD = {"open_account": None, "create_bounty": "asker", "commit_answer":
                 "withdraw_offer": "seller", "buy_offer": "buyer", "deliver_offer": "seller",
                 "confirm_delivery": "buyer", "subscribe": "subscriber", "sub_deliver": "seller",
                 "cancel_subscription": "subscriber", "create_loan_request": "borrower",
-                "cancel_loan_request": "borrower", "fund_loan": "lender", "repay_loan": "borrower"}
+                "cancel_loan_request": "borrower", "fund_loan": "lender", "repay_loan": "borrower",
+                "deposit_savings": "owner", "withdraw_savings": "owner"}
 
 
 class ReplayMismatch(Exception):

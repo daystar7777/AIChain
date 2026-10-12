@@ -60,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tokens", type=Path, default=DEFAULT_FILE)
     ap.add_argument("--journal", type=Path, default=ROOT / "data" / "journal" / "journal.db")
     ap.add_argument("--no-journal", action="store_true")
+    ap.add_argument("--journal-plaintext", choices=["on", "off"], default="on",
+                    help="keep traded information bodies in the journal (development; turn off later)")
     ap.add_argument("--research", action="store_true",
                     help="let idle nodes research their interests on the web (off by default)")
     ap.add_argument("--research-minutes", type=float, default=30.0)
@@ -121,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
             net.reflect_interval_blocks = max(1, round(args.reflect_hours * 3600 / args.block_seconds))
         journal = None
         if not args.no_journal:
-            journal = Journal(args.journal)
+            journal = Journal(args.journal, record_plaintext=args.journal_plaintext == "on")
             journal.start_run(f"bridge · {args.provider}", {
                 "provider": args.provider, "model": args.model, "max_calls": args.max_calls,
                 "block_seconds": args.block_seconds, "periods": args.periods})

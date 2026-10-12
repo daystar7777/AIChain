@@ -88,3 +88,20 @@ def test_nodes_borrow_and_lend_through_tools():
     net.advance(720)
     assert loan.state == "REPAID"
     assert any(m.source == f"chain:{loan.loan_id}" for m in n2.memory.records)
+
+
+def test_savings_earn_from_issuance_and_forfeit_early():
+    b = Board(Params())
+    for n in ("a", "b", "c"):
+        b.open_account(n, 100_000)
+    b.heartbeat("a", 0)
+    d1 = b.deposit_savings("b", 30_000, 2 * 720)
+    d2 = b.deposit_savings("c", 10_000, 2 * 720)
+    b.advance(720)  # epoch 0 issued: 10% of 720P = 72P to savers 3:1
+    assert d1.earned_mP == 54_000 and d2.earned_mP == 18_000
+    assert b.accounts["a"].balance_mP == 100_000 + 720_000 * 55 // 100
+    b.withdraw_savings("c", d2.deposit_id)  # early: principal back, interest burned
+    assert b.accounts["c"].balance_mP == 100_000 and b.burned_mP == 18_000
+    b.advance(720)  # epoch 1 (no heartbeat): only b saves -> full savings pool; then matures
+    assert d1.state == "MATURED" and b.accounts["b"].balance_mP == 100_000 + 54_000 + 72_000
+    assert b.total_supply_check()
