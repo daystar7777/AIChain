@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--research", action="store_true",
                     help="let idle nodes research their interests on the web (off by default)")
     ap.add_argument("--research-minutes", type=float, default=30.0)
-    ap.add_argument("--economy-hours", type=float, default=4.0,
+    ap.add_argument("--economy-hours", type=float, default=8.0,
                     help="periodic economy check per node (0 disables)")
     ap.add_argument("--reflect-hours", type=float, default=24.0,
                     help="daily reflection and persona self-editing per node (0 disables)")

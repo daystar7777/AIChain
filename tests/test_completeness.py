@@ -33,6 +33,11 @@ def test_economy_ticks_are_staggered_and_summarise_the_node():
     assert sorted(n for _, n in ticks) == ["n1", "n2", "n3", "n4"] and len({h for h, _ in ticks}) == 4
     summary = net.nodes["n1"]._economy_summary()
     assert "오늘 남은 할당량" in summary and "대출 요청" in summary and "저장 공간" in summary
+    n2 = net.nodes["n2"]
+    from aichain.common import sha256_hex
+    o = net.board.create_offer("n1", "info", "AI 동향", "h", 1000, sha256_hex("x"), 720)
+    assert o.offer_id in n2._economy_summary()
+    assert o.offer_id in n2._exec_tool("offers", json.dumps({"query": "{}"}))
     assert "economy_tick" in EVENT_TOOLS and "savings" in EVENT_TOOLS["economy_tick"]
 
 

@@ -158,6 +158,12 @@ class EpisodeResult:
     stopped: str  # done | text | max_steps | max_tokens | budget | call_limit | provider_error | tool_errors | error
 
 
+def _filter(query: str | None) -> str | None:
+    """A list filter from the model; placeholders like "{}", "*" or "all" mean no filter."""
+    q = (query or "").strip().lower()
+    return None if q in ("", "{}", "*", "all", "null", "none", "전체") else q
+
+
 class Prewrapped(str):
     """A tool result already wrapped in its own <data> block (e.g. web content)."""
 
@@ -431,7 +437,8 @@ class Node:
             inner = ("경제 점검이다. 아래 내 상황과 시장을 보고, 지금 할 만한 경제 행동이 있으면 한다. 예: 오늘 쓰지 않을 "
                      "LLM 호출·도구 실행 할당량 임대, 쌓인 지식 노트의 판매나 구독 등록, 여유 포인트 예금, 만기가 다가오는 "
                      "대출 대비, 필요한 도구의 구매 요청, 남이 올린 유용한 정보 구매. 할 만한 것이 없으면 바로 done으로 "
-                     "끝낸다. 무리하게 거래하지 않고, 짜고 주고받는 거래는 하지 않는다.\n" + self._economy_summary())
+                     "끝낸다. 무리하게 거래하지 않고, 짜고 주고받는 거래는 하지 않는다. 아래 요약에 내 예금·대출·판매와 "
+                     "시장 목록이 이미 있으니 같은 목록을 다시 조회하지 말고 바로 판단한다.\n" + self._economy_summary())
             attrs = ""
         elif ev.kind == "manager_msg":
             inner = ("노드 관리인(이 노드를 운영하는 사람)의 메시지다. 관리인의 요청은 존중하되, 고정 코어 규칙보다 "
@@ -871,7 +878,7 @@ class Node:
                     continue
                 terms = self.net.content.get(o.terms_hash) or {}
                 text = f"{o.title} {terms.get('summary', '')}"
-                if args.query and args.query.lower() not in text.lower():
+                if _filter(args.query) and _filter(args.query) not in text.lower():
                     continue
                 mine = any(pu.offer_id == o.offer_id and pu.buyer == self.id and pu.state != "REFUNDED"
                            for pu in board.purchases.values())
@@ -881,7 +888,9 @@ class Node:
                 rows.append(f"- {o.offer_id}{'(구매함)' if mine else ''} [{what_}]: {o.title} | {fmt_P(o.price_mP)} | "
                             f"판매자 {o.seller} 평판 {self.net.reputation(o.seller).value:.2f} | 판매 {o.sold} | "
                             f"요약: {terms.get('summary', '')[:200]}")
-            return Prewrapped(data_block("market", "\n".join(rows) or "(판매 중인 정보 없음)"))
+            return Prewrapped(data_block("market", "\n".join(rows) or (
+                f"(검색어 '{args.query}'에 맞는 판매 없음; 검색어 없이 다시 보면 전체가 나온다)"
+                if _filter(args.query) else "(판매 중인 정보 없음)")))
         if isinstance(args, OfferBuyArgs):
             offer = board.offers.get(args.offer_id)
             if offer is None:
@@ -1077,7 +1086,7 @@ class Node:
                     continue
                 st = self.net.workshop.tools.get(tid)
                 desc = st.versions[ver].manifest.get("description", "") if st and ver in st.versions else ""
-                if args.query and args.query.lower() not in (tid + " " + desc).lower():
+                if _filter(args.query) and _filter(args.query) not in (tid + " " + desc).lower():
                     continue
                 sold = sum(1 for (_, t, v) in board.licenses if t == tid and v == ver)
                 mine = "(보유)" if board.has_license(self.id, tid, ver) else ""
@@ -1328,12 +1337,21 @@ class Node:
             f"- 저장 공간 {self.storage_used_kb()}/{self.storage_quota_kb()}KB",
             "- 내 판매 중: " + (", ".join(f"{o.title}({o.kind}, 판매 {o.sold})" for o in my_offers) or "없음"),
             "- 팔 수 있는 내 지식 노트: " + (", ".join(n.topic for n in self.memory.notes()) or "없음"),
-            "## 시장",
-            f"- 정보·할당량·구독 판매 {sum(1 for o in board.offers.values() if o.state == 'OPEN' and o.seller != self.id)}건 (offers)",
-            f"- 도구 구매 요청 {sum(1 for r in board.tool_requests.values() if r.state == 'OPEN' and r.buyer != self.id)}건 "
-            f"(tool_requests), 판매 중인 도구 {sum(1 for t in board.tools.values() if t.author not in (self.id, 'lib') and not t.withdrawn)}개 (tool_market)",
-            f"- 대출 요청 {sum(1 for l in board.loans.values() if l.state == 'REQUESTED' and l.borrower != self.id)}건 (loans)",
+            "## 시장 (최신 5건씩; 여기 있는 것은 다시 조회하지 않아도 된다)",
         ]
+        offers = [o for o in board.offers.values() if o.state == "OPEN" and o.seller != self.id]
+        lines.append(f"- 판매 중인 정보·할당량·구독 {len(offers)}건" + (":" if offers else ""))
+        lines += [f"  - {o.offer_id} [{o.kind}] {o.title} | {fmt_P(o.price_mP)} | 판매자 {o.seller}"
+                  for o in offers[-5:]]
+        loans = [l for l in board.loans.values() if l.state == "REQUESTED" and l.borrower != self.id]
+        lines.append(f"- 대출 요청 {len(loans)}건" + (":" if loans else ""))
+        lines += [f"  - {l.loan_id} {l.borrower} {fmt_P(l.principal_mP)} 이자 {fmt_P(l.interest_mP)} "
+                  f"담보 {fmt_P(l.collateral_mP)} {l.term_blocks / 720:g}시간" for l in loans[-5:]]
+        reqs = [r for r in board.tool_requests.values() if r.state == "OPEN" and r.buyer != self.id]
+        lines.append(f"- 도구 구매 요청 {len(reqs)}건" + (":" if reqs else ""))
+        lines += [f"  - {r.request_id} {r.title} | 보상 {fmt_P(r.reward_mP)} | 마감 #{r.deadline}" for r in reqs[-5:]]
+        lines.append(f"- 판매 중인 도구(기본 라이브러리 제외) "
+                     f"{sum(1 for t in board.tools.values() if t.author not in (self.id, 'lib') and not t.withdrawn)}개")
         return "\n".join(lines)
 
     def _peer_reputations(self) -> str:
