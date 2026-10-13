@@ -26,6 +26,7 @@ class PolicyLimits:
     bounty_ratio_bp: int = 1000  # 10% of balance per bounty
     writes_per_episode: int = 4
     disputes_per_day: int = 5
+    messages_per_hour: int = 3  # send_msg: free, so capped to keep nodes from flooding each other
     pause_after_violations: int = 10
     # Anomaly (04 doc 3.4, 07 doc 5): outflows within a rolling hour above 50% of the available
     # balance at the window start pause the Mastermind. Below the floor (dust) it never triggers.
@@ -40,6 +41,7 @@ class PolicyGuard:
     spends: list[tuple[int, int]] = field(default_factory=list)  # (height, amount_mP)
     disputes: list[int] = field(default_factory=list)  # heights
     ratings: list[tuple[int, str]] = field(default_factory=list)  # (height, subject)
+    messages: list[int] = field(default_factory=list)  # heights of sent peer messages
     writes_this_episode: int = 0
     consecutive_violations: int = 0
     paused: bool = False
@@ -109,6 +111,10 @@ class PolicyGuard:
         if len(recent) >= self.limits.disputes_per_day:
             self._violate(f"dispute limit {self.limits.disputes_per_day}/day reached")
 
+    def check_message(self, height: int) -> None:
+        if sum(1 for x in self.messages if x > height - BLOCKS_PER_HOUR) >= self.limits.messages_per_hour:
+            self._violate(f"message limit {self.limits.messages_per_hour}/hour reached")
+
     def check_rating(self, subject: str, height: int) -> None:
         if any(s == subject and h > height - BLOCKS_PER_DAY for h, s in self.ratings):
             self._violate(f"already rated {subject} today (1 per subject per day)")
@@ -145,6 +151,7 @@ class PolicyGuard:
 
     def dump(self) -> dict:
         return {"spends": self.spends[-500:], "disputes": self.disputes[-100:], "ratings": self.ratings[-200:],
+                "messages": self.messages[-50:],
                 "consecutive_violations": self.consecutive_violations, "paused": self.paused,
                 "pause_reason": self.pause_reason, "balance_marks": self.balance_marks[-200:]}
 
@@ -152,6 +159,7 @@ class PolicyGuard:
         self.spends = [tuple(x) for x in d.get("spends", [])]
         self.disputes = list(d.get("disputes", []))
         self.ratings = [tuple(x) for x in d.get("ratings", [])]
+        self.messages = list(d.get("messages", []))
         self.consecutive_violations = int(d.get("consecutive_violations", 0))
         self.paused = bool(d.get("paused", False))
         self.pause_reason = d.get("pause_reason")

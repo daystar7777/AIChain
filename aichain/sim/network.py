@@ -367,6 +367,17 @@ class Network:
         self.log(node_id, "manager_message", direction="to_manager", text=text[:500])
         return item
 
+    def send_peer_message(self, sender: str, to: str, text: str) -> tuple[str, bool]:
+        """send_msg (04 doc 3.3): free text between nodes, no chain write and no points. Journaled
+        here; the recipient gets a peer_msg event with the text as <data source="peer:<sender>">."""
+        msg_id = "msg_" + sha256_hex(f"{sender}|{to}|{self.board.height}|{len(self.events)}|{text}")[:12]
+        node = self.nodes[to]
+        queued = self.gateway.has_daily_room(to) and not node.policy.paused
+        self.log(sender, "peer_msg", msg_id=msg_id, to=to, text=text, queued=queued)
+        if queued:
+            node.enqueue("peer_msg", {"msg_id": msg_id, "from": sender, "text": text})
+        return msg_id, queued
+
     def manager_receive(self, node_id: str, text: str, sender: str = "manager") -> None:
         node = self.nodes.get(node_id)
         if node is None:
