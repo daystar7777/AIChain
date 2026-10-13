@@ -99,6 +99,7 @@ def build_network(
     research_interval_blocks: int | None = None,
     daily_calls_per_node: int | None = None,
     daily_calls_total: int | None = None,
+    duty_reserve_share: float = 0.2,
     workshop: Workshop | None = None,
     usage_path: str | None = None,
     chain: "ChainStore | None" = None,
@@ -118,6 +119,7 @@ def build_network(
     gateway = LLMGateway(adapters, GatewayConfig(max_calls=max_calls,
                                                  daily_calls_per_node=daily_calls_per_node,
                                                  daily_calls_total=daily_calls_total,
+                                                 duty_reserve_share=duty_reserve_share,
                                                  usage_path=usage_path))
     net = Network(gateway, params or replace(SHORT_PARAMS), trace=trace, echo=echo, web=web,
                   knowledge=knowledge, research_interval_blocks=research_interval_blocks,

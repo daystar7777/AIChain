@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from aichain.bridge.runtime import NetworkRuntime
 from aichain.bridge.tokens import Client, TokenStore
+from aichain.node import PRIORITY
 
 
 class QuestionIn(BaseModel):
@@ -61,8 +62,8 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
 
     @app.exception_handler(TimeoutError)
     async def busy(request: Any, exc: TimeoutError) -> Any:
-        # runtime.call waits for the simulation thread, which may be inside a long LLM episode.
-        # The action stays queued and runs as soon as the thread is free.
+        # runtime.call waits for the block thread, which may be waiting for the board (a slow tool
+        # step of an episode, a long catch-up). The action stays queued and runs as soon as it is free.
         from fastapi.responses import JSONResponse
 
         return JSONResponse({"accepted": True, "detail": "the network is busy with an episode; the action "
@@ -362,8 +363,8 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
             node = net.nodes.get(node_id)
             if node is None:
                 raise HTTPException(404, f"no node {node_id}")
-            if not net.gateway.has_daily_room(node_id):
-                raise HTTPException(409, f"{node_id} has no LLM calls left today")
+            if not net.gateway.has_daily_room(node_id, PRIORITY[body.kind]):
+                raise HTTPException(409, f"{node_id} has no LLM calls left today for optional work")
             node.enqueue(body.kind, {})
             return {"queued": body.kind}
         return runtime.call(fn)

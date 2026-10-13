@@ -157,3 +157,42 @@ def test_content_survives_restart(tmp_path):
     assert again.content.get(h) == {"title": "x"} and again.content_author[h] == "n1"
     assert set(again.board.accounts) == {"n1", "n2", "n3", "n4", "operator"}
     assert again.board.issued_mP == 4_000_000  # genesis grants not repeated
+
+
+def test_missing_or_replaced_key_of_an_existing_chain_stops_startup(tmp_path):
+    from aichain.chain.crypto import MissingKey
+
+    db, keys = tmp_path / "chain.db", tmp_path / "keys"
+    net = build_network("scripted", chain=ChainStore(db))  # genesis: every key is created
+    net.advance(3)
+    assert {"root.key", "n1.key", "n2.key", "operator.key"} <= {p.name for p in keys.iterdir()}
+
+    (keys / "n2.key").rename(tmp_path / "n2.key.bak")
+    with pytest.raises(MissingKey, match="n2.key is missing.*Restore n2.key"):
+        build_network("scripted", chain=ChainStore(db))
+    assert not (keys / "n2.key").exists()  # no new key was made in its place
+
+    (keys / "root.key").rename(tmp_path / "root.key.bak")
+    with pytest.raises(MissingKey, match="root.key is missing"):
+        build_network("scripted", chain=ChainStore(db))
+    assert not (keys / "root.key").exists()
+
+    (tmp_path / "root.key.bak").rename(keys / "root.key")
+    (keys / "n2.key").write_text((keys / "n3.key").read_text())  # some other key in its place
+    with pytest.raises(MissingKey, match="not the key the chain has for 'n2'"):
+        build_network("scripted", chain=ChainStore(db))
+
+    (tmp_path / "n2.key.bak").replace(keys / "n2.key")  # restored from backup: starts as before
+    again = build_network("scripted", chain=ChainStore(db))
+    assert again.board.height == 3 and again.board.state_root() == net.board.state_root()
+
+
+def test_keys_are_still_created_for_a_new_chain_and_new_accounts(tmp_path):
+    from aichain.node import NodeConfig
+
+    db = tmp_path / "chain.db"
+    build_network("scripted", chain=ChainStore(db))
+    net = build_network("scripted", chain=ChainStore(db))
+    net.add_node(NodeConfig("n5", "nomad"))  # an account the chain does not have yet gets a key
+    assert (tmp_path / "keys" / "n5.key").exists()
+    assert build_network("scripted", chain=ChainStore(db)).board.accounts["n5"].pubkey == net.keys.pubkey("n5")

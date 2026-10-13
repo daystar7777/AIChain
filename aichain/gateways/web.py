@@ -7,8 +7,9 @@ from __future__ import annotations
 import re
 import time
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, ContextManager, Protocol
 
 import httpx
 
@@ -72,6 +73,8 @@ class SearchGateway:
         self._history: dict[tuple[str, str], deque[float]] = {}
         # Caches are per node: one node's results never leak into another's (05 doc 1.3).
         self._cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
+        # Wraps the wait on the provider (see LLMGateway.call_guard).
+        self.call_guard: Callable[[], ContextManager[Any]] | None = None
 
     def _take(self, node: str, kind: str, limit: int) -> None:
         now = self._clock()
@@ -117,10 +120,10 @@ class SearchGateway:
         self._cache[(node, "fetch", key)] = (self._clock(), result)
         return result
 
-    @staticmethod
-    def _call(fn: Callable[..., dict[str, Any]], *args: Any) -> dict[str, Any]:
+    def _call(self, fn: Callable[..., dict[str, Any]], *args: Any) -> dict[str, Any]:
         try:
-            result = fn(*args)
+            with self.call_guard() if self.call_guard is not None else nullcontext():
+                result = fn(*args)
         except WebError:
             raise
         except Exception as e:  # malformed response, decoding error, provider bug

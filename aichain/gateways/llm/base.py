@@ -4,11 +4,13 @@ per-node token buckets and retry with backoff (design docs 03 ch. 5, 04 ch. 2 an
 
 from __future__ import annotations
 
+import math
 import random
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, ContextManager, Protocol
 
 
 @dataclass
@@ -164,6 +166,16 @@ class CallLimitReached(Exception):
     pass
 
 
+# Event priorities 1–3 (04 doc 3.1) are duties: judging, disputes and reviews, governance votes,
+# operator and Bridge questions, answering bounties. 4–5 (loan offers, peer messages, research,
+# economy ticks, reflection and persona edits) are optional work.
+DUTY_MAX_PRIORITY = 3
+
+
+def is_duty(priority: int) -> bool:
+    return priority <= DUTY_MAX_PRIORITY
+
+
 @dataclass
 class GatewayConfig:
     output_weight: float = 2.0  # output token cost relative to input (Muse Spark: 0.2 / 0.1)
@@ -171,6 +183,9 @@ class GatewayConfig:
     max_calls: int | None = None  # hard cap on total provider calls (smoke tests)
     daily_calls_per_node: int | None = None  # per UTC day
     daily_calls_total: int | None = None  # per UTC day, all nodes
+    # Share of each daily call cap (per node and total) that only duties may use; optional work
+    # stops at the reserve line so a busy day of research cannot leave a judgement or vote undone.
+    duty_reserve_share: float = 0.2
     # Persist daily counters here so restarts cannot reset the caps.
     usage_path: str | None = None
     daily_tool_runs_per_node: int | None = 40  # compute quota (isolated tool executions)
@@ -203,6 +218,9 @@ class LLMGateway:
         # Called after every provider call: (request, response | None, info). The journal
         # uses this to record full prompts and responses.
         self.observers: list[Callable[[LLMRequest, LLMResponse | None, dict[str, Any]], None]] = []
+        # Wraps the wait on the provider (each attempt and each backoff). The Bridge runtime uses it
+        # to let blocks be produced while an episode waits on the model.
+        self.call_guard: Callable[[], ContextManager[Any]] | None = None
 
     def register(self, node_id: str, bucket: TokenBucket) -> None:
         self.buckets[node_id] = bucket
@@ -214,11 +232,9 @@ class LLMGateway:
         if self.config.max_calls is not None and self.calls >= self.config.max_calls:
             raise CallLimitReached(f"gateway call cap {self.config.max_calls} reached")
         day = _today()
-        node_cap, total_cap = self.node_cap(request.node_id, "llm_calls"), self.config.daily_calls_total
-        if node_cap is not None and self._daily.get((day, request.node_id), 0) >= node_cap:
-            raise CallLimitReached(f"{request.node_id}: daily call cap {node_cap} reached")
-        if total_cap is not None and self._daily.get((day, "*"), 0) >= total_cap:
-            raise CallLimitReached(f"daily call cap {total_cap} (all nodes) reached")
+        problem = self._daily_problem(request.node_id, priority)
+        if problem:
+            raise CallLimitReached(problem)
         self._daily[(day, request.node_id)] = self._daily.get((day, request.node_id), 0) + 1
         self._daily[(day, "*")] = self._daily.get((day, "*"), 0) + 1
         self._save_usage(day)
@@ -228,7 +244,8 @@ class LLMGateway:
             started = time.monotonic()
             try:
                 self.calls += 1
-                resp = adapter.complete(request)
+                with self._guard():
+                    resp = adapter.complete(request)
                 break
             except ProviderError as e:
                 self._notify(request, None, {"provider": provider, "attempt": attempt,
@@ -239,7 +256,8 @@ class LLMGateway:
                 delay = e.retry_after if e.retry_after is not None else (
                     2**attempt + self._rng.uniform(0, 0.5))
                 attempt += 1
-                self._sleep(min(delay, 60.0))
+                with self._guard():
+                    self._sleep(min(delay, 60.0))
             except Exception as e:  # adapter bug or malformed data: non-retryable provider error
                 err = ProviderError(f"adapter error: {type(e).__name__}: {e}"[:300], status=0)
                 self._notify(request, None, {"provider": provider, "attempt": attempt,
@@ -260,6 +278,9 @@ class LLMGateway:
                                      "budget_remaining": bucket.remaining(),
                                      "budget_state": str(bucket.state)})
         return resp
+
+    def _guard(self) -> ContextManager[Any]:
+        return self.call_guard() if self.call_guard is not None else nullcontext()
 
     def _load_usage(self) -> None:
         import json
@@ -299,10 +320,20 @@ class LLMGateway:
             return None
         return base + self._adjust.get((_today(), self._key(node_id, kind)), 0)
 
-    def remaining(self, node_id: str, kind: str) -> int | None:
+    def reserve(self, node_id: str | None) -> int:
+        """LLM calls of today's cap kept for duties: of one node's cap, or of the total (None).
+        Taken from the configured cap, so rented calls are all usable for optional work."""
+        cap = self.config.daily_calls_per_node if node_id is not None else self.config.daily_calls_total
+        share = min(1.0, max(0.0, self.config.duty_reserve_share))
+        return 0 if cap is None else math.ceil(cap * share)
+
+    def remaining(self, node_id: str, kind: str, duty: bool = True) -> int | None:
+        """Today's quota left; duty=False: what optional work may still use (LLM calls above the reserve)."""
         cap = self.node_cap(node_id, kind)
         if cap is None:
             return None
+        if not duty and kind == "llm_calls":
+            cap -= self.reserve(node_id)
         return max(0, cap - self._daily.get((_today(), self._key(node_id, kind)), 0))
 
     def take_tool_run(self, node_id: str) -> None:
@@ -314,24 +345,51 @@ class LLMGateway:
         self._save_usage(day)
 
     def transfer_quota(self, kind: str, seller: str, buyer: str, amount: int) -> None:
-        """Rental: move `amount` of today's unused quota from seller to buyer (network total unchanged)."""
-        left = self.remaining(seller, kind)
+        """Rental: move `amount` of today's unused quota from seller to buyer (network total unchanged).
+        The seller's duty reserve is not for sale."""
+        left = self.remaining(seller, kind, duty=False)
         if left is None:
             raise CallLimitReached(f"{kind} has no per-node quota to rent")
         if left < amount:
-            raise CallLimitReached(f"{seller} has only {left} {kind} left today")
+            raise CallLimitReached(f"{seller} has only {left} {kind} left today (apart from its duty reserve)")
         day = _today()
         for node, delta in ((seller, -amount), (buyer, amount)):
             key = (day, self._key(node, kind))
             self._adjust[key] = self._adjust.get(key, 0) + delta
         self._save_usage(day)
 
-    def has_daily_room(self, node_id: str) -> bool:
+    def _daily_problem(self, node_id: str, priority: int) -> str | None:
+        """Why a call of this priority may not be made today (None: it may). Optional work stops
+        at the duty reserve of the node's cap and of the total cap; duties may use all of it."""
         day = _today()
         node_cap, total_cap = self.node_cap(node_id, "llm_calls"), self.config.daily_calls_total
-        if node_cap is not None and self._daily.get((day, node_id), 0) >= node_cap:
+        node_used, total_used = self._daily.get((day, node_id), 0), self._daily.get((day, "*"), 0)
+        if node_cap is not None and node_used >= node_cap:
+            return f"{node_id}: daily call cap {node_cap} reached"
+        if total_cap is not None and total_used >= total_cap:
+            return f"daily call cap {total_cap} (all nodes) reached"
+        if is_duty(priority):
+            return None
+        if node_cap is not None and node_used >= node_cap - self.reserve(node_id):
+            return (f"{node_id}: today's calls for optional work are used up ({node_cap - self.reserve(node_id)} "
+                    f"of {node_cap}; the rest is kept for duties)")
+        if total_cap is not None and total_used >= total_cap - self.reserve(None):
+            return (f"today's calls for optional work are used up on the network ({total_cap - self.reserve(None)} "
+                    f"of {total_cap}; the rest is kept for duties)")
+        return None
+
+    def has_daily_room(self, node_id: str, priority: int = 1) -> bool:
+        """Whether a call of this priority would pass today's caps (default: a duty)."""
+        return self._daily_problem(node_id, priority) is None
+
+    def can_call(self, node_id: str, priority: int) -> bool:
+        """Whether a call of this priority would be accepted now (token budget, call caps)."""
+        bucket = self.buckets.get(node_id)
+        if bucket is not None and not (bucket.allows(priority) and bucket.can_spend(priority)):
             return False
-        return not (total_cap is not None and self._daily.get((day, "*"), 0) >= total_cap)
+        if self.config.max_calls is not None and self.calls >= self.config.max_calls:
+            return False
+        return self.has_daily_room(node_id, priority)
 
     def daily_usage(self) -> dict[str, int]:
         day = _today()

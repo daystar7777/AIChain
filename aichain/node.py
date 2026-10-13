@@ -43,6 +43,7 @@ from aichain.mastermind.tools import (
     AnswerArgs,
     AskArgs,
     DisputeArgs,
+    ForgetArgs,
     PersonaEditArgs,
     ProposeArgs,
     RateArgs,
@@ -80,7 +81,8 @@ from aichain.mastermind.tools import (
     ToolRunArgs,
     tool_specs,
 )
-from aichain.memory import Memory
+from aichain.duties import DutyRetry
+from aichain.memory import CORE_KEEP_BLOCKS, DIGEST_EVERY_BLOCKS, MASTERMIND, Memory
 from aichain.workshop.registry import WorkshopError
 from aichain.chain.errors import ChainHalted
 
@@ -217,6 +219,9 @@ class Node:
         self.current_event: QueuedEvent | None = None
         self._episodes = itertools.count(1)
         self._last_budget_state = self.bucket.state
+        # Duties that could not get LLM calls wait here and are queued again later (B1).
+        self.retry = DutyRetry(self)
+        self._provider_retryable = False
 
     # ---- events ----
 
@@ -225,7 +230,8 @@ class Node:
 
     @property
     def has_pending(self) -> bool:
-        return bool(self._queue)
+        """Events waiting, or one in progress (blocks may be produced while it waits on the model)."""
+        return bool(self._queue) or self.current_event is not None
 
     def run_pending(self) -> list[EpisodeResult]:
         results = []
@@ -238,8 +244,9 @@ class Node:
                 self.net.log(self.id, "skip_event", kind=ev.kind, reason="paused by Policy Guard", **ref)
                 continue
             if not self.bucket.allows(ev.priority):
+                deferred = self.retry.refused(ev, f"budget {self.bucket.state}")
                 self.net.log(self.id, "skip_event", kind=ev.kind,
-                             reason=f"budget {self.bucket.state}", **ref)
+                             reason=f"budget {self.bucket.state}", deferred=deferred, **ref)
                 continue
             results.append(self.run_episode(ev))
         return results
@@ -247,7 +254,10 @@ class Node:
     # ---- Core duties (no LLM) ----
 
     def run_duties(self) -> None:
-        """Reveal committed answers as soon as their bounty enters REVEAL (04 doc 6.1)."""
+        """Every block: reveal committed answers as soon as their bounty enters REVEAL (04 doc 6.1),
+        queue again duties that waited for LLM capacity, stop subscription renewals the Policy
+        Guard would refuse; once a day fold Core's week-old records into a digest so they cannot
+        grow without bound (they do not count in the storage quota)."""
         self.policy.observe_balance(self.net.board.height, self.net.board.account(self.id).available_mP)
         for answer_id, (body, salt) in list(self._sealed.items()):
             ans = self.net.board.answers[answer_id]
@@ -263,6 +273,14 @@ class Node:
             if self.net.chain is not None:
                 self.net.chain.delete_sealed(answer_id)
             self.net.log(self.id, "duty_reveal", answer_id=answer_id)
+        if not self.policy.paused:  # paused: waiting duties stay parked until the operator unpauses
+            self.retry.release()
+        self._stop_unaffordable_renewals()
+        h = self.net.board.height
+        if h and h % DIGEST_EVERY_BLOCKS == 0 and h > CORE_KEEP_BLOCKS:
+            digest = self.memory.compact(h - CORE_KEEP_BLOCKS, h)
+            if digest is not None:
+                self.net.log(self.id, "memory_compacted", records=len(digest.data["seqs"]), seq=digest.seq)
 
     def on_settled(self, payload: dict[str, Any]) -> None:
         b = self.net.board.bounty(payload["bounty_id"])
@@ -275,6 +293,41 @@ class Node:
         self.memory.remember(self.net.board.height, "episode", f"chain:{b.bounty_id}", 1.0, text,
                              tags=b.tags)
         self.net.log(self.id, "memory", kind="episode", source=f"chain:{b.bounty_id}", content=text)
+
+    def on_subscription_period(self, sub: Any) -> None:
+        """Core: a period of my subscription closed on chain and it renewed (or ended) by itself.
+        The Mastermind never approved the renewal, so it is noted where it will see it, and counted
+        as a spend for the Policy Guard."""
+        h, title = self.net.board.height, self.net.board.offers[sub.offer_id].title
+        if sub.state == "ACTIVE":
+            self.policy.record_spend(sub.price_mP, h)
+            text = (f"구독 {sub.sub_id} '{title}'(판매자 {sub.seller})이 자동 갱신됨: 다음 기간 요금 "
+                    f"{fmt_P(sub.price_mP)} 에스크로, 블록 {sub.period_start + sub.period_blocks}까지. 지금까지 결제 "
+                    f"{sub.periods_paid}기간, 환불 {sub.periods_refunded}기간. 필요 없으면 subscriptions(cancel=...).")
+        else:
+            text = (f"구독 {sub.sub_id} '{title}'이 갱신되지 않고 끝남(잔액 부족 또는 판매 중단). "
+                    f"결제 {sub.periods_paid}기간, 환불 {sub.periods_refunded}기간.")
+        self.memory.remember(h, "episode", f"chain:{sub.sub_id}", 1.0, text, ["subscription"])
+        self.net.log(self.id, "subscription_renewed" if sub.state == "ACTIVE" else "subscription_ended",
+                     sub_id=sub.sub_id, price=fmt_P(sub.price_mP), paid=sub.periods_paid,
+                     refunded=sub.periods_refunded)
+
+    def _stop_unaffordable_renewals(self) -> None:
+        """Core: cancel my subscription in its last block when the coming automatic renewal would
+        break my Policy Guard spending limits (the Mastermind never sees that spend coming)."""
+        board, h = self.net.board, self.net.board.height
+        for sub in list(board.subscriptions.values()):
+            if sub.subscriber != self.id or sub.state != "ACTIVE" or h + 1 < sub.period_start + sub.period_blocks:
+                continue
+            problem = self.policy.spend_problem(sub.price_mP, board.account(self.id).available_mP, h + 1)
+            if problem is None:
+                continue
+            board.cancel_subscription(self.id, sub.sub_id)
+            self.memory.remember(h, "episode", f"chain:{sub.sub_id}", 1.0,
+                                 f"구독 {sub.sub_id} 해지(Core): 다음 갱신 요금 {fmt_P(sub.price_mP)}이 지출 한도를 "
+                                 f"넘어서 갱신 전에 끊었다 ({problem}). 결제 {sub.periods_paid}기간, "
+                                 f"환불 {sub.periods_refunded}기간.", ["subscription"])
+            self.net.log(self.id, "subscription_cancelled", sub_id=sub.sub_id, by="core", reason=problem)
 
     def restore_from_chain(self) -> None:
         """After a restart: reload sealed answers and re-raise judging duties missed while down."""
@@ -370,7 +423,7 @@ class Node:
             f"- 평판 {self.net.reputation(self.id).value:.2f}\n"
             f"- 다른 노드 평판: {self._peer_reputations()}\n"
             f"- LLM 예산 {self.bucket.remaining()} 토큰, 상태 {self.bucket.state}\n"
-            f"- 오늘 남은 할당량: LLM 호출 {self.net.gateway.remaining(self.id, 'llm_calls') if self.net.gateway.remaining(self.id, 'llm_calls') is not None else '제한 없음'}, "
+            f"- 오늘 남은 할당량: LLM 호출 {self._llm_quota_text()}, "
             f"도구 실행 {self.net.gateway.remaining(self.id, 'tool_runs')} (offers로 사고팔 수 있다)\n"
             f"- 기억 저장 공간 {self.storage_used_kb()}/{self.storage_quota_kb()}KB\n"
             f"- 내가 판정할 현상금 {len(to_judge)}개\n"
@@ -452,7 +505,7 @@ class Node:
             attrs = f'proposal_id="{prop.proposal_id}" kind="{prop.kind}"'
         elif ev.kind == "reflect":
             since = p.get("since_seq", 0)
-            recent = [r for r in self.memory.records if r.seq > since and r.kind in (
+            recent = [r for r in self.memory.records if r.seq > since and not r.pruned and r.kind in (
                 "episode", "fact", "belief", "relation", "note")][-25:]
             rep, bal = self.net.reputation(self.id).value, board.account(self.id).balance_mP
             prev = p.get("prev") or {}
@@ -586,9 +639,11 @@ class Node:
             self.net.log(self.id, "memory_error", error=f"{type(e).__name__}: {e}"[:300])
         result = EpisodeResult(self.id, ev.kind, stats["steps"], stats["calls"], stats["tokens"],
                                summary, stopped)
+        deferred = self.retry.after_episode(ev, stopped, summary, self.policy.writes_this_episode,
+                                            self._provider_retryable)
         self.net.log(self.id, "episode_end", kind=ev.kind, steps=stats["steps"],
                      llm_calls=stats["calls"], tokens=stats["tokens"], stopped=stopped,
-                     summary=summary, **ref)
+                     summary=summary, **ref, **({"deferred": True} if deferred else {}))
         self.net.current_episode = None
         self.check_budget_state()
         return result
@@ -611,6 +666,7 @@ class Node:
             except CallLimitReached as e:
                 return str(e), "call_limit"
             except ProviderError as e:
+                self._provider_retryable = e.retryable
                 return str(e), "provider_error"
             stats["calls"] += 1
             stats["tokens"] += resp.usage.input_tokens + resp.usage.output_tokens
@@ -705,17 +761,35 @@ class Node:
         if isinstance(args, (RememberArgs, NoteArgs)):
             new_kb = (len(args.content.encode()) if isinstance(args, RememberArgs)
                       else len(args.model_dump_json().encode())) / 1024
+            old = self.memory.latest_note(args.topic) if isinstance(args, NoteArgs) else None
+            if old is not None:
+                new_kb -= self.memory.size(old) / 1024  # the version it replaces stops counting
             if self.storage_used_kb() + new_kb > self.storage_quota_kb():
                 raise BoardError(f"저장 공간이 가득 찼다({self.storage_used_kb()}/{self.storage_quota_kb()}KB). "
-                                 "offers에서 storage를 임대하거나, 같은 주제 노트를 갱신해 정리한다.")
+                                 "forget으로 필요 없는 기억이나 지식 노트를 지우면(seq 또는 topic) 공간이 생긴다. "
+                                 "같은 주제 노트를 더 짧게 고쳐 써도 된다(이전 판은 계산에서 빠진다). 그래도 모자라면 "
+                                 f"offers에서 storage를 임대한다. 큰 항목: {self.memory.largest()}")
+        if isinstance(args, ForgetArgs):
+            target = (self.memory.latest_note(args.topic) if args.topic
+                      else self.memory.get(args.seq) if args.seq else None)
+            if target is None:
+                raise BoardError("지울 기억을 seq(번호)나 topic(지식 노트 주제)으로 지정한다" if not (args.topic or args.seq)
+                                 else "그런 기억이나 노트가 없다")
+            if target.hash not in {r.hash for r in self.memory.held()}:
+                raise BoardError(f"#{target.seq}는 지울 수 없다: 내가 remember·note로 쓴 기억 중 아직 남아 있는 것만 "
+                                 "지울 수 있다(Core 기록, 이미 대체되거나 지운 기억은 안 된다)")
+            self.memory.forget(h, target, args.reason)
+            self.net.log(self.id, "memory_forgotten", seq=target.seq, kind=target.kind, topic=target.topic,
+                         reason=args.reason[:200])
+            return f"#{target.seq} 지움. 저장 공간 {self.storage_used_kb()}/{self.storage_quota_kb()}KB"
         if isinstance(args, RememberArgs):
             if args.source_url:
                 content_hash = self._require_fetched(args.source_url)
                 rec = self.memory.remember(h, args.kind, f"web:{args.source_url}", WEB_TRUST,
-                                           args.content, args.tags, [*args.refs, content_hash])
+                                           args.content, args.tags, [*args.refs, content_hash], by=MASTERMIND)
             else:
                 rec = self.memory.remember(h, args.kind, "self", 1.0, args.content, args.tags,
-                                           args.refs)
+                                           args.refs, by=MASTERMIND)
             self.net.log(self.id, "memory", kind=rec.kind, source=rec.source, content=rec.content,
                          trust=rec.trust, seq=rec.seq)
             return f"기억 #{rec.seq} 기록됨 (source={rec.source}, trust={rec.trust:.2f})"
@@ -908,9 +982,9 @@ class Node:
             return (f"구독 상품 {offer.offer_id}: '{args.note_topic}' 노트 갱신본, {args.period_hours:g}시간마다 "
                     f"{fmt_P(offer.price_mP)}")
         if isinstance(args, OfferCreateArgs) and args.kind != "info":
-            left = self.net.gateway.remaining(self.id, args.kind)
+            left = self.net.gateway.remaining(self.id, args.kind, duty=False)  # the duty reserve is not for sale
             if left is not None and left < args.quantity:
-                raise BoardError(f"오늘 남은 {args.kind}이 {left}개뿐이다")
+                raise BoardError(f"오늘 팔 수 있는 {args.kind}이 {left}개뿐이다")
             terms_hash = self.net.put_content({"title": args.title, "summary": args.summary,
                                                "kind": args.kind, "quantity": args.quantity,
                                                "valid": "until 00:00 UTC"}, author=self.id)
@@ -979,7 +1053,7 @@ class Node:
                 return Prewrapped(data_block("core", head) + "\n" + data_block(
                     f"deal:{offer.seller}", first[:8000], trust=self.net.reputation(offer.seller).value))
             if offer.kind in ("llm_calls", "tool_runs"):
-                left = self.net.gateway.remaining(offer.seller, offer.kind)
+                left = self.net.gateway.remaining(offer.seller, offer.kind, duty=False)
                 if left is not None and left < offer.quantity:
                     raise BoardError(f"판매자에게 오늘 남은 {offer.kind}이 {left}개뿐이라 이 묶음을 팔 수 없다")
             if offer.kind == "storage" and offer.seller in self.net.nodes \
@@ -1198,7 +1272,7 @@ class Node:
             rec = self.memory.remember(h, "note", "self:research", WEB_TRUST,
                                        f"[{args.topic}] {args.summary}", [args.topic],
                                        sorted(set(hashes)), supersedes=prev.hash if prev else None,
-                                       topic=args.topic, data=data)
+                                       topic=args.topic, data=data, by=MASTERMIND)
             version = sum(1 for r in self.memory.records if r.kind == "note" and r.topic == args.topic)
             for sub in board.subscriptions.values():  # Core: push the new version to subscribers
                 if (sub.seller == self.id and sub.state == "ACTIVE"
@@ -1414,11 +1488,20 @@ class Node:
                 f"거부되면 집행하지 않는다.")
 
     def execute_approval(self, raw_args: str, tool: str) -> str:
-        self._executing_approval = True
+        # Runs on a block, possibly while an episode of this node waits on the model: it must not
+        # act in that episode's context (e.g. link a bounty to its Bridge question).
+        self._executing_approval, event, self.current_event = True, self.current_event, None
         try:
             return self._exec_tool(tool, raw_args)
         finally:
-            self._executing_approval = False
+            self._executing_approval, self.current_event = False, event
+
+    def _llm_quota_text(self) -> str:
+        gw = self.net.gateway
+        left, total = gw.remaining(self.id, "llm_calls", duty=False), gw.remaining(self.id, "llm_calls")
+        if left is None or total is None:
+            return "제한 없음"
+        return f"{left} (그 밖에 판정·투표·질문 같은 의무에만 쓰는 예비 {total - left})"
 
     def storage_used_kb(self) -> int:
         return -(-self.memory.usage_bytes() // 1024)
@@ -1445,7 +1528,7 @@ class Node:
             "- 빌린 돈: " + (", ".join(f"{l.loan_id} {fmt_P(l.principal_mP + l.interest_mP)} 만기 #{l.due}"
                                     for l in borrowing) or "없음"),
             "- 빌려준 돈: " + (", ".join(f"{l.loan_id} → {l.borrower} 만기 #{l.due}" for l in lending) or "없음"),
-            f"- 오늘 남은 할당량: LLM 호출 {gw.remaining(self.id, 'llm_calls')}, 도구 실행 {gw.remaining(self.id, 'tool_runs')}",
+            f"- 오늘 남은 할당량: LLM 호출 {self._llm_quota_text()}, 도구 실행 {gw.remaining(self.id, 'tool_runs')}",
             f"- 저장 공간 {self.storage_used_kb()}/{self.storage_quota_kb()}KB",
             "- 내 판매 중: " + (", ".join(f"{o.title}({o.kind}, 판매 {o.sold})" for o in my_offers) or "없음"),
             "- 팔 수 있는 내 지식 노트: " + (", ".join(n.topic for n in self.memory.notes()) or "없음"),

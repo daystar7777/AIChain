@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Callable
 
 import base64
 
@@ -58,10 +59,19 @@ class DecryptError(Exception):
     pass
 
 
+class MissingKey(Exception):
+    """A key the chain already binds to an account is missing or replaced. Never answered with a
+    new key: it would not match the account, and every later signature would break the chain."""
+
+
 class KeyStore:
-    def __init__(self, directory: Path | None) -> None:
-        """directory None: keys live only in memory (tests, networks without a chain)."""
+    def __init__(self, directory: Path | None,
+                 expected: Callable[[str], str | None] | None = None) -> None:
+        """directory None: keys live only in memory (tests, networks without a chain).
+        expected(name): the public key the chain already has for `name` (None: not on chain yet).
+        Only keys without one may be generated; the others must be on disk and match."""
         self.dir = directory
+        self._expected = expected
         if directory is not None:
             directory.mkdir(parents=True, exist_ok=True)
             os.chmod(directory, 0o700)
@@ -79,15 +89,38 @@ class KeyStore:
             self._keys[name] = SigningKey.generate()
         if name not in self._keys:
             path = self.dir / f"{name}.key"
+            want = self._expected(name) if self._expected is not None else None
             if path.exists():
-                self._keys[name] = SigningKey(bytes.fromhex(path.read_text().strip()))
-            else:
+                k = SigningKey(bytes.fromhex(path.read_text().strip()))
+                if want and k.verify_key.encode().hex() != want:
+                    raise MissingKey(
+                        f"{path} is not the key the chain has for '{name}' (public key {want[:16]}…). "
+                        f"Restore the original {path.name} from a backup (python -m aichain.backup restore).")
+                self._keys[name] = k
+            elif want:
+                raise MissingKey(
+                    f"key file {path} is missing, but the chain already has the account '{name}' "
+                    f"(public key {want[:16]}…). A new key would not match it, so none is created. "
+                    f"Restore {path.name} into {self.dir} from a backup (python -m aichain.backup restore), "
+                    "then start again.")
+            else:  # genesis, or an account the chain does not have yet
                 k = SigningKey.generate()
                 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "w") as f:
                     f.write(k.encode().hex())
                 self._keys[name] = k
         return self._keys[name]
+
+    def check(self, names: list[str]) -> None:
+        """Startup check: every account the chain already has must have its own key on disk."""
+        problems = []
+        for name in names:
+            try:
+                self.key(name)
+            except MissingKey as e:
+                problems.append(str(e))
+        if problems:
+            raise MissingKey("\n".join(problems))
 
     def pubkey(self, name: str) -> str:
         return self.key(name).verify_key.encode().hex()

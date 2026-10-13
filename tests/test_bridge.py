@@ -20,7 +20,9 @@ def bridge(tmp_path):
         alice = add_client(path, "alice", daily_limit)
         bob = add_client(path, "bob", daily_limit)
         net = build_network("scripted", brain=brain)
-        runtime = NetworkRuntime(net, block_seconds=0.001)
+        # Blocks follow the wall clock (they keep coming while an episode waits on the model), so
+        # a block must stay long next to a scripted episode for the windows to mean anything.
+        runtime = NetworkRuntime(net, block_seconds=0.02)
         app = create_app(runtime, TokenStore.load(path), sse_poll_seconds=0.01)
         return TestClient(app), {"alice": alice, "bob": bob}, runtime
     return make

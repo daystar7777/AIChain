@@ -12,7 +12,7 @@ from typing import Any, Callable, TextIO
 
 from aichain import audit
 from aichain.board import Board, BoardError, BoardEvent, Params
-from aichain.common import sha256_hex
+from aichain.common import canonical_json, sha256_hex
 from aichain.reputation import EPOCH_BLOCKS, Reputation, for_board
 from aichain.content import ContentStore
 from aichain.gateways.llm.base import LLMGateway
@@ -21,8 +21,8 @@ from aichain.memory import KnowledgeStore
 from aichain.workshop.registry import Workshop
 from aichain.chain.crypto import KeyStore
 from aichain.chain.errors import ChainHalted
-from aichain.chain.store import ChainStore, attach as attach_chain
-from aichain.node import EpisodeResult, Node, NodeConfig
+from aichain.chain.store import ROOT_ACCOUNT, ChainStore, attach as attach_chain
+from aichain.node import PRIORITY, EpisodeResult, Node, NodeConfig
 
 SECONDS_PER_BLOCK = 5
 
@@ -48,6 +48,9 @@ class Network:
         self.reflect_interval_blocks: int | None = None
         # Periodic economy check per node (staggered); None disables.
         self.economy_interval_blocks: int | None = None
+        # advance() runs queued episodes after every block. The Bridge runtime turns this off and
+        # runs episodes on their own thread, so blocks keep coming while a model call is pending.
+        self.inline_episodes = True
         self.board = Board(params)
         self.content = ContentStore()
         self.chain_stats: dict[str, int] | None = None
@@ -60,8 +63,12 @@ class Network:
                 self.content.put(obj)
                 if author:
                     self.content_author.setdefault(h, author)
-            self.keys = KeyStore(chain.path.parent / "keys")
+            # Keys of accounts the chain already has are never regenerated: a missing one stops startup.
+            self.keys = KeyStore(chain.path.parent / "keys", expected=lambda name: (
+                chain.get_meta("root_pubkey") if name == ROOT_ACCOUNT
+                else getattr(self.board.accounts.get(name), "pubkey", None)))
             self.chain_stats = attach_chain(self.board, chain, self.keys)
+            self.keys.check([ROOT_ACCOUNT, *self.board.accounts])
         self.events: list[dict[str, Any]] = []
         self.episodes: list[EpisodeResult] = []
         self._trace = trace
@@ -108,22 +115,25 @@ class Network:
     def announce_proposal(self, proposal_id: str) -> None:
         prop = self.board.proposals[proposal_id]
         for node in self.nodes.values():
-            if node.id != prop.proposer and node.id in self.board.voters() \
-                    and self.gateway.has_daily_room(node.id):
-                node.enqueue("proposal_open", {"proposal_id": proposal_id})
+            if node.id != prop.proposer and node.id in self.board.voters():
+                node.enqueue("proposal_open", {"proposal_id": proposal_id})  # a duty: retried if refused
 
     def remind_voters(self) -> None:
-        """Hourly: re-send open proposals to voters who have not voted yet, so a proposal does not
-        expire for lack of quorum because a node was out of calls when it was first announced."""
+        """Hourly: re-send open proposals to voters who have not voted yet (an episode that ended
+        without a vote, or events skipped while paused), so a proposal does not expire for lack of
+        quorum. Duties refused for lack of calls are already waiting in the node's DutyRetry."""
         for prop in self.board.proposals.values():
             if prop.state != "VOTING":
                 continue
             for node in self.nodes.values():
-                if node.id == prop.proposer or node.id in prop.votes or node.id not in self.board.voters():
+                if node.id == prop.proposer or node.id in prop.votes or node.id not in self.board.voters() \
+                        or node.policy.paused:
                     continue
-                queued = any(ev.kind == "proposal_open" and ev.payload.get("proposal_id") == prop.proposal_id
-                             for ev in node._queue)
-                if not queued and self.gateway.has_daily_room(node.id):
+                pending = [ev.payload for ev in node._queue if ev.kind == "proposal_open"]
+                pending += [w.payload for w in node.retry.waiting if w.kind == "proposal_open"]
+                if any(p.get("proposal_id") == prop.proposal_id for p in pending):
+                    continue
+                if self.gateway.has_daily_room(node.id, PRIORITY["proposal_open"]):
                     node.enqueue("proposal_open", {"proposal_id": prop.proposal_id})
 
     def complete_purchase(self, purchase_id: str) -> str | None:
@@ -186,7 +196,8 @@ class Network:
         return opened
 
     def deliver_subscription(self, sub_id: str) -> str | None:
-        """Core: send the seller's current note on the subscribed topic, sealed to the subscriber."""
+        """Core: send the seller's current note on the subscribed topic, sealed to the subscriber.
+        Only a note that changed since the last delivery counts: re-saving it is not a delivery."""
         from aichain.chain.crypto import seal_for
 
         sub = self.board.subscriptions[sub_id]
@@ -197,15 +208,22 @@ class Network:
         note = seller.memory.latest_note(topic) if topic else None
         if note is None or not note.data:
             return None
+        digest = sha256_hex(canonical_json({"topic": note.topic, **note.data}))
+        if seller.private.get(f"sub_sent:{sub_id}") == digest:
+            return None
         text = json.dumps({"topic": note.topic, "version_seq": note.seq, **note.data}, ensure_ascii=False, indent=1)
         box = seal_for(self.board.account(sub.subscriber).pubkey, text.encode())
         c_hash = self.put_content({"sealed_for": sub.subscriber, "box": box}, author=sub.seller)
         self.board.sub_deliver(sub.seller, sub_id, c_hash)
+        seller.private[f"sub_sent:{sub_id}"] = digest
+        if self.chain is not None:
+            self.chain.put_private(sub.seller, f"sub_sent:{sub_id}", digest)
         opened = self.keys.open_sealed(sub.subscriber, box).decode()
+        prev = next((r for r in reversed(buyer.memory.records) if r.data and r.data.get("sub_id") == sub_id), None)
         buyer.memory.remember(self.board.height, "fact", f"deal:{sub.seller}",
                               round(self.reputation(sub.seller).value, 3),
                               f"[구독 {topic}] {opened[:1500]}", ["deal", "subscription", topic[:40]], [c_hash],
-                              data={"sub_id": sub_id})
+                              data={"sub_id": sub_id}, supersedes=prev.hash if prev else None)
         self.log("core", "subscription_delivered", sub_id=sub_id, seller=sub.seller,
                  subscriber=sub.subscriber, topic=topic)
         return opened
@@ -213,7 +231,7 @@ class Network:
     def announce_loan(self, loan_id: str) -> None:
         loan = self.board.loans[loan_id]
         for node in self.nodes.values():
-            if node.id != loan.borrower and self.gateway.has_daily_room(node.id):
+            if node.id != loan.borrower and self.gateway.has_daily_room(node.id, PRIORITY["loan_request_new"]):
                 node.enqueue("loan_request_new", {"loan_id": loan_id})
 
     def notify_loan(self, loan_id: str) -> None:
@@ -347,6 +365,11 @@ class Network:
                         tags=["governance"]))
         elif ev.kind == "loan_settled":
             self.notify_loan(ev.payload["loan_id"])
+        elif ev.kind == "subscription_period":  # renewed (or ended) on chain without the subscriber
+            sub = self.board.subscriptions[ev.payload["sub_id"]]
+            if sub.subscriber in self.nodes:
+                self.guarded(sub.subscriber, ev.kind,
+                             lambda: self.nodes[sub.subscriber].on_subscription_period(sub))
         elif ev.kind == "tool_request_expired":
             req = self.board.tool_requests[ev.payload["request_id"]]
             if req.buyer in self.nodes:
@@ -382,7 +405,7 @@ class Network:
         for node in self.nodes.values():
             if node_ids is not None and node.id not in node_ids:
                 continue
-            if not self.gateway.has_daily_room(node.id):
+            if not self.gateway.has_daily_room(node.id, PRIORITY["reflect"]):
                 continue
             marker = next((r for r in reversed(node.memory.records)
                            if r.kind == "reflection" and r.source == "chain:reflect"), None)
@@ -456,7 +479,7 @@ class Network:
     def research(self, node_ids: list[str] | None = None) -> None:
         for node in self.nodes.values():
             if (node_ids is None or node.id in node_ids) and node.cfg.interests:
-                if not self.gateway.has_daily_room(node.id):
+                if not self.gateway.has_daily_room(node.id, PRIORITY["research_tick"]):
                     continue  # no LLM calls left today: don't queue work that cannot run
                 node.enqueue("research_tick", {})
 
@@ -481,7 +504,7 @@ class Network:
                 for i, nid in enumerate(ids):
                     node = self.nodes[nid]
                     if (self.board.height + i * offset + offset // 2) % e == 0 and not node.has_pending \
-                            and self.gateway.has_daily_room(nid):
+                            and self.gateway.has_daily_room(nid, PRIORITY["economy_tick"]):
                         node.enqueue("economy_tick", {})
             n = self.research_interval_blocks
             if n and self.board.height % n == 0:
@@ -499,7 +522,8 @@ class Network:
             for node in self.nodes.values():
                 self.guarded(node.id, "run_duties", node.run_duties)
             self.run_approvals()
-            self.run_until_idle()
+            if self.inline_episodes:
+                self.run_until_idle()
 
     def balances(self) -> dict[str, dict[str, int]]:
         return {nid: {"balance_mP": a.balance_mP, "locked_mP": a.locked_mP}
