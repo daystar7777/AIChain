@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
@@ -118,7 +119,7 @@ def build_network(
                                                  daily_calls_per_node=daily_calls_per_node,
                                                  daily_calls_total=daily_calls_total,
                                                  usage_path=usage_path))
-    net = Network(gateway, params or SHORT_PARAMS, trace=trace, echo=echo, web=web,
+    net = Network(gateway, params or replace(SHORT_PARAMS), trace=trace, echo=echo, web=web,
                   knowledge=knowledge, research_interval_blocks=research_interval_blocks,
                   workshop=workshop, chain=chain)
     for cfg in default_nodes(provider, model, nomad_model, interests):

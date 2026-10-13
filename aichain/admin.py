@@ -6,6 +6,8 @@
     python -m aichain.admin proposals [--all]
     python -m aichain.admin vote <proposal_id> yes|no|abstain --reason "why"   (operator seat)
     python -m aichain.admin veto <proposal_id> --reason "why"                   (root, timelock only)
+    python -m aichain.admin close <proposal_id> implemented|abandoned --note "what was done"
+    python -m aichain.admin block-tool <tool_id> <version> --reason "why"      (root: stop a bad tool)
     python -m aichain.admin approvals [--all]                      (outflows waiting for the manager)
     python -m aichain.admin approve <approval_id> [--note "..."] / deny <approval_id> [--note "..."]
     python -m aichain.admin persona <node> [--version N]          (history, or show one version)
@@ -48,6 +50,14 @@ def main(argv: list[str] | None = None) -> int:
     ve = sub.add_parser("veto", help="root veto during the timelock")
     ve.add_argument("proposal_id")
     ve.add_argument("--reason", required=True)
+    cl = sub.add_parser("close", help="close an approved policy/upgrade proposal (IMPLEMENTING)")
+    cl.add_argument("proposal_id")
+    cl.add_argument("outcome", choices=["implemented", "abandoned"])
+    cl.add_argument("--note", required=True)
+    bt = sub.add_parser("block-tool", help="block a published tool version (root)")
+    bt.add_argument("tool_id")
+    bt.add_argument("version", type=int)
+    bt.add_argument("--reason", required=True)
     ap_ = sub.add_parser("approvals", help="node outflows waiting for the manager")
     ap_.add_argument("--all", action="store_true")
     for verb in ("approve", "deny"):
@@ -115,6 +125,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{x['proposal_id']}  [{x['state']}] {x['kind']} '{x['title']}' by {x['proposer']}\n"
                   f"    changes: {changes}\n    votes: {votes}  (vote until #{x['vote_until']}, "
                   f"timelock until #{x['timelock_until']}, now #{x['height']})")
+        return 0
+    if args.cmd == "close":
+        r = client.post(f"/admin/v1/proposals/{args.proposal_id}/close",
+                        json={"outcome": args.outcome, "note": args.note})
+        if r.status_code >= 400:
+            print(f"error {r.status_code}: {r.text}", file=sys.stderr)
+            return 1
+        print(f"{args.proposal_id} -> {r.json()['state']}")
+        return 0
+    if args.cmd == "block-tool":
+        r = client.post(f"/admin/v1/tools/{args.tool_id}/block", json={"version": args.version, "reason": args.reason})
+        if r.status_code >= 400:
+            print(f"error {r.status_code}: {r.text}", file=sys.stderr)
+            return 1
+        print(f"{args.tool_id} v{args.version} -> blocked")
         return 0
     if args.cmd in ("vote", "veto"):
         path = f"/admin/v1/proposals/{args.proposal_id}/{args.cmd}"

@@ -111,6 +111,20 @@ class Network:
                     and self.gateway.has_daily_room(node.id):
                 node.enqueue("proposal_open", {"proposal_id": proposal_id})
 
+    def remind_voters(self) -> None:
+        """Hourly: re-send open proposals to voters who have not voted yet, so a proposal does not
+        expire for lack of quorum because a node was out of calls when it was first announced."""
+        for prop in self.board.proposals.values():
+            if prop.state != "VOTING":
+                continue
+            for node in self.nodes.values():
+                if node.id == prop.proposer or node.id in prop.votes or node.id not in self.board.voters():
+                    continue
+                queued = any(ev.kind == "proposal_open" and ev.payload.get("proposal_id") == prop.proposal_id
+                             for ev in node._queue)
+                if not queued and self.gateway.has_daily_room(node.id):
+                    node.enqueue("proposal_open", {"proposal_id": prop.proposal_id})
+
     def complete_purchase(self, purchase_id: str) -> str | None:
         """Core-to-Core delivery of an info purchase, end-to-end encrypted:
         seller Core seals the plaintext to the buyer's key -> buyer Core opens it, checks it against
@@ -441,6 +455,8 @@ class Network:
                         pass
             if self.audit_interval_blocks and self.board.height % self.audit_interval_blocks == 0:
                 audit.run_on_network(self)
+            if self.board.height % EPOCH_BLOCKS == 0:
+                self.remind_voters()
             for node in self.nodes.values():
                 node.run_duties()
             self.run_approvals()

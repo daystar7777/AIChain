@@ -158,6 +158,24 @@ class EpisodeResult:
     stopped: str  # done | text | max_steps | max_tokens | budget | call_limit | provider_error | tool_errors | error
 
 
+BLOCKS_PER_MINUTE = 12  # 5-second blocks
+
+
+def bounty_windows(params: Any, minutes: int, rules: int) -> dict[str, int]:
+    """Fit commit, reveal and judging inside a client's deadline (03 doc 3.1). Each period keeps
+    its default when it fits and never drops below 12 blocks (1 minute). Under rules 1 only the
+    commit period can be set."""
+    budget = minutes * BLOCKS_PER_MINUTE
+    lo, hi = params.commit_blocks_range
+    if rules < 2:
+        return {"commit_blocks": max(lo, min(params.commit_blocks, hi,
+                                             budget - params.reveal_blocks - params.judge_blocks))}
+    reveal = max(12, min(params.reveal_blocks, budget // 6))
+    judge = max(12, min(params.judge_blocks, budget // 3))
+    commit = max(lo, min(params.commit_blocks, hi, budget - reveal - judge))
+    return {"commit_blocks": commit, "reveal_blocks": reveal, "judge_blocks": judge}
+
+
 def _filter(query: str | None) -> str | None:
     """A list filter from the model; placeholders like "{}", "*" or "all" mean no filter."""
     q = (query or "").strip().lower()
@@ -363,6 +381,8 @@ class Node:
                                trust=self.net.reputation(b.asker).value)
             attrs = (f'bounty_id="{b.bounty_id}" asker="{b.asker}" reward="{fmt_P(b.reward_mP)}" '
                      f'tags="{",".join(b.tags)}" commit_until="{b.commit_until}"')
+            if b.min_rep_e6:
+                attrs += f' min_reputation="{b.min_rep_e6 / 1e6:.2f}"'
         elif ev.kind == "judge_due":
             b = board.bounty(p["bounty_id"])
             q = self.net.content.get(b.question_hash)
@@ -1131,7 +1151,13 @@ class Node:
                 raise BoardError(f"reward exceeds the client's max_reward {ctx['max_reward_P']}P")
             self.policy.check_spend(reward, acct.available_mP, h, bounty=True)
             q_hash = self.net.put_content(args.question.model_dump(), author=self.id)
-            b = board.create_bounty(self.id, q_hash, reward, args.tags, args.max_answers)
+            opts: dict[str, Any] = {}
+            minutes = [m for m in (args.answer_minutes, ctx.get("deadline_minutes")) if m is not None]
+            if minutes:
+                opts.update(bounty_windows(board.params, min(minutes), board.rules))
+            if args.min_reputation is not None and board.rules >= 2:
+                opts["min_rep_e6"] = round(args.min_reputation * 1_000_000)
+            b = board.create_bounty(self.id, q_hash, reward, args.tags, args.max_answers, **opts)
             self.policy.record_write(reward, h)
             if "ref" in ctx:
                 self.net.link_question(ctx["ref"], b.bounty_id)

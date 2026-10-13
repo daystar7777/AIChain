@@ -239,6 +239,35 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
             return proposal_view(net, net.board.proposals[proposal_id])
         return _gov_action(fn)
 
+    class CloseIn(BaseModel):
+        outcome: str = Field(pattern="^(implemented|abandoned)$")
+        note: str = Field(min_length=3, max_length=1000)
+
+    @app.post("/admin/v1/proposals/{proposal_id}/close", dependencies=[Depends(operator)])
+    def root_close(proposal_id: str, body: CloseIn) -> dict[str, Any]:
+        """Close an approved policy/upgrade proposal once it is implemented (or dropped)."""
+        def fn(net: Any) -> dict[str, Any]:
+            h = net.put_content({"outcome": body.outcome, "note": body.note}, author="root")
+            net.board.close_proposal("root", proposal_id, body.outcome, h)
+            net.log("operator", "proposal_closed", proposal_id=proposal_id, outcome=body.outcome,
+                    note=body.note[:300])
+            return proposal_view(net, net.board.proposals[proposal_id])
+        return _gov_action(fn)
+
+    class BlockToolIn(BaseModel):
+        version: int
+        reason: str = Field(min_length=3, max_length=1000)
+
+    @app.post("/admin/v1/tools/{tool_id}/block", dependencies=[Depends(operator)])
+    def root_block_tool(tool_id: str, body: BlockToolIn) -> dict[str, Any]:
+        """Operator block (05 doc 4.3): withdrawn, no new licenses, paid calls refused."""
+        def fn(net: Any) -> dict[str, Any]:
+            h = net.put_content({"block": body.reason}, author="root")
+            net.board.block_tool("root", tool_id, body.version, h)
+            net.log("operator", "tool_blocked", tool_id=tool_id, version=body.version, reason=body.reason[:300])
+            return {"tool_id": tool_id, "version": body.version, "blocked": True}
+        return _gov_action(fn)
+
     class RollbackIn(BaseModel):
         version: int
         note: str = Field(default="", max_length=500)

@@ -82,6 +82,10 @@ class AskArgs(BaseModel):
     reward_P: float = Field(ge=1, description="현상금(P). 즉시 잠긴다.")
     tags: list[str] = Field(default_factory=list, max_length=5)
     max_answers: int | None = Field(default=None, ge=1, le=20)
+    answer_minutes: int | None = Field(
+        default=None, ge=3, le=1440, description="판정까지 끝나야 하는 시간(분). 비우면 기본 기간")
+    min_reputation: float | None = Field(
+        default=None, ge=0, le=0.9, description="답변 자격 최소 평판(0~0.9). 비우면 제한 없음")
 
 
 class AnswerBody(BaseModel):
