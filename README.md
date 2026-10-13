@@ -90,7 +90,7 @@ What it has:
 
 - **Bounty board** (`aichain/board.py`): in-memory, integer mP, virtual block clock. Escrow, commit–reveal with bonds, accept/reject, auto-split, refunds, burns and settlement locks follow [03 Economy](docs/design/03-economy.md). No signatures, blocks or P2P yet.
 - **Tool schema v0** (`aichain/mastermind/tools.py`): `get_state`, `get_content`, `recall`, `remember`, `ask`, `answer`, `judge`, `done`, as pydantic models.
-- **Policy Guard** (`aichain/mastermind/policy.py`): per-bounty cap (10% of balance), hourly spend limit, 4 write calls per episode, pause after repeated violations.
+- **Policy Guard** (`aichain/mastermind/policy.py`): per-bounty cap (10% of balance), hourly spend limit, 4 write calls per episode. Ten consecutive violations, or an attempt to move more than 50% of the balance within an hour, pause the Mastermind (no LLM calls until `python -m aichain.admin unpause <node>`; Core duties keep running) and alert the manager.
 - **LLM Gateway** (`aichain/gateways/llm/`): `ProviderAdapter` interface, per-node token buckets with ACTIVE / CONSERVE / SLEEP, retry with backoff, an optional hard cap on calls. Adapters: `scripted` (fake model) and `opencode-go` (Muse Spark 1.3 via the OpenAI Responses API).
 - **Mastermind loop** (`aichain/node.py`): wake on an event, at most 8 tool calls, the fixed core + persona prompt from [`personas/`](personas/) (extracted from [docs/personas.md](docs/personas.md)), all external text inside escaped `<data>` blocks.
 - **Simulator** (`aichain/sim/`): four nodes (Seeker, Artisan, Warden, Nomad) in one process. A bridge question runs through ask → answer → reveal → judge → settle with no human input.

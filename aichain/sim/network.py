@@ -382,7 +382,14 @@ class Network:
             node = self.nodes.get(a.node)
             if node is None:
                 continue
-            result = node.execute_approval(a.args, a.tool)
+            if node.policy.paused and a.decided_by == "timeout":
+                from aichain.common import data_block
+
+                # Nobody approved it and the node is paused for review: do not move its points.
+                result = data_block("core", "거부(Policy Guard): 노드가 일시 정지 상태라 응답 없는 승인 건을 "
+                                            "집행하지 않는다")
+            else:
+                result = node.execute_approval(a.args, a.tool)
             ok = not any(result.startswith(f'<data source="core">\n{p}')
                          for p in ("오류", "거부", "웹 오류", "내부 오류", "관리인 승인 대기"))
             self.approvals.finish(a, ok, result)

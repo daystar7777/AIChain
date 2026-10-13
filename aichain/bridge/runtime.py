@@ -289,6 +289,9 @@ class NetworkRuntime:
                 self._by_bounty[e["bounty_id"]] = rec.ref
                 rec.bounty = self._bounty_view(e["bounty_id"])
                 self._push(rec, "bounty_open", {"bounty": rec.bounty})
+            elif kind == "skip_event" and e.get("kind") == "bridge_question" and rec.bounty_id is None:
+                rec.note = f"the receiving node did not take the question ({e.get('reason')})"
+                self._push(rec, "failed", {"note": rec.note})
             elif kind == "episode_end" and e.get("kind") == "bridge_question":
                 rec.note = e.get("summary")
                 if rec.bounty_id is None:
@@ -320,7 +323,8 @@ class NetworkRuntime:
                 {"id": n.id, "persona": n.cfg.persona,
                  "balance": fmt_P(board.accounts[n.id].balance_mP),
                  "locked": fmt_P(board.accounts[n.id].locked_mP),
-                 "reputation": round(net.reputation(n.id).value, 3), "budget_state": str(n.bucket.state)}
+                 "reputation": round(net.reputation(n.id).value, 3), "budget_state": str(n.bucket.state),
+                 "paused": n.policy.paused, "pause_reason": n.policy.pause_reason}
                 for n in net.nodes.values()
             ],
             "recent_bounties": [

@@ -155,7 +155,7 @@ class EpisodeResult:
     llm_calls: int
     tokens: int
     summary: str | None
-    stopped: str  # done | text | max_steps | max_tokens | budget | call_limit | provider_error | tool_errors | error
+    stopped: str  # done | text | max_steps | max_tokens | budget | call_limit | provider_error | tool_errors | paused | error
 
 
 def _filter(query: str | None) -> str | None:
@@ -186,6 +186,7 @@ class Node:
         # Node-private data never put on the chain: plaintext behind my info offers.
         self.private: dict[str, Any] = net.chain.private_for(cfg.node_id) if net.chain is not None else {}
         self.policy = PolicyGuard(cfg.node_id)
+        self.policy.on_pause = self._on_policy_pause
         self.bucket = TokenBucket(cfg.daily_budget_tokens, clock=net.clock_minutes)
         net.gateway.register(cfg.node_id, self.bucket)
         self._queue: list[QueuedEvent] = []
@@ -209,9 +210,15 @@ class Node:
         results = []
         while self._queue and not self.net.halted:
             ev = heapq.heappop(self._queue)
+            ref = {"ref": ev.payload["ref"]} if "ref" in ev.payload else {}
+            if self.policy.paused:
+                # No LLM calls at all until the operator unpauses, duties included: judging falls back
+                # to the protocol default (AUTO_SPLIT), and judge_due is raised again on unpause.
+                self.net.log(self.id, "skip_event", kind=ev.kind, reason="paused by Policy Guard", **ref)
+                continue
             if not self.bucket.allows(ev.priority):
                 self.net.log(self.id, "skip_event", kind=ev.kind,
-                             reason=f"budget {self.bucket.state}")
+                             reason=f"budget {self.bucket.state}", **ref)
                 continue
             results.append(self.run_episode(ev))
         return results
@@ -220,6 +227,7 @@ class Node:
 
     def run_duties(self) -> None:
         """Reveal committed answers as soon as their bounty enters REVEAL (04 doc 6.1)."""
+        self.policy.observe_balance(self.net.board.height, self.net.board.account(self.id).available_mP)
         for answer_id, (body, salt) in list(self._sealed.items()):
             ans = self.net.board.answers[answer_id]
             if self.net.board.bounty(ans.bounty_id).state != BountyState.REVEAL:
@@ -246,9 +254,29 @@ class Node:
     def restore_from_chain(self) -> None:
         """After a restart: reload sealed answers and re-raise judging duties missed while down."""
         self._sealed.update(self.net.chain.sealed_for(self.id))
+        self._requeue_judging()
+
+    def _requeue_judging(self) -> None:
         for b in self.net.board.bounties.values():
             if b.asker == self.id and b.state == BountyState.JUDGING and b.accepted is None:
                 self.enqueue("judge_due", {"bounty_id": b.bounty_id})
+
+    def _on_policy_pause(self, reason: str) -> None:
+        """Policy Guard paused the Mastermind (04 doc 3.4, 07 doc 5): journal it and alert the operator."""
+        self.net.log(self.id, "policy_paused", reason=reason)
+        self.net.manager_send("core", f"⛔ {self.id} 마스터마인드 일시 정지 (Policy Guard): {reason}\n"
+                                      "LLM 호출은 멈추고 Core 의무(답변 공개, 하트비트)는 계속 돈다. "
+                                      f"확인 후 해제: python -m aichain.admin unpause {self.id}")
+
+    def unpause(self, note: str = "") -> None:
+        """Operator command: lift the pause and pick up judging duties skipped meanwhile."""
+        reason = self.policy.pause_reason
+        self.policy.unpause()
+        self.net.log("operator", "policy_unpaused", target=self.id, reason=reason, note=note[:300])
+        self.memory.remember(self.net.board.height, "episode", "operator", 1.0,
+                             f"운영자가 Policy Guard 일시 정지를 풀었다 (정지 사유: {reason}). 메모: {note}",
+                             ["policy"])
+        self._requeue_judging()
 
     @property
     def persona_layer(self) -> str:
@@ -556,6 +584,8 @@ class Node:
                     return _parse_summary(call.arguments), "done"
                 result = self._exec_tool(call.name, call.arguments)
                 messages.append(Message("tool", result, call_id=call.call_id, name=call.name))
+                if self.policy.paused:
+                    return f"Policy Guard가 마스터마인드를 일시 정지함: {self.policy.pause_reason}", "paused"
                 if self._tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES:
                     return (f"도구 호출이 연속 {self._tool_failures}번 실패해 에피소드를 끝냄",
                             "tool_errors")
@@ -1289,6 +1319,7 @@ class Node:
         available = self.net.board.account(self.id).available_mP
         if not book.policy.needs_approval(name, amount, available):
             return None
+        self.policy.check_outflow(amount, available, self.net.board.height)  # the attempt counts (04 doc 3.4)
         reason = getattr(args, "memo", "") or json.dumps(json.loads(raw_args or "{}"), ensure_ascii=False)[:300]
         a = book.request(self.id, name, raw_args or "{}", amount, reason)
         self.net.log(self.id, "approval_requested", approval_id=a.approval_id, tool=name,

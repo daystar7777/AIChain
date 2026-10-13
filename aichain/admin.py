@@ -10,6 +10,7 @@
     python -m aichain.admin approve <approval_id> [--note "..."] / deny <approval_id> [--note "..."]
     python -m aichain.admin persona <node> [--version N]          (history, or show one version)
     python -m aichain.admin rollback <node> <version> --note "why"
+    python -m aichain.admin unpause <node> [--note "why"]          (lift a Policy Guard pause)
 
 Rulings are signed by the root key inside the network and recorded on the chain.
 """
@@ -61,6 +62,9 @@ def main(argv: list[str] | None = None) -> int:
     rb.add_argument("node")
     rb.add_argument("version", type=int)
     rb.add_argument("--note", default="")
+    up = sub.add_parser("unpause", help="lift a Policy Guard pause after reviewing it")
+    up.add_argument("node")
+    up.add_argument("--note", default="")
     args = ap.parse_args(argv)
 
     token = args.token_file.read_text().strip()
@@ -102,6 +106,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error {r.status_code}: {r.text}", file=sys.stderr)
             return 1
         print(f"{args.node} -> v{r.json()['version']} (restored v{args.version})")
+        return 0
+    if args.cmd == "unpause":
+        r = client.post(f"/admin/v1/nodes/{args.node}/unpause", json={"note": args.note})
+        if r.status_code >= 400:
+            print(f"error {r.status_code}: {r.text}", file=sys.stderr)
+            return 1
+        print(f"{args.node} unpaused (was: {r.json()['was']})")
         return 0
     if args.cmd == "proposals":
         r = client.get("/admin/v1/proposals", params={"state": "all" if args.all else "open"})
