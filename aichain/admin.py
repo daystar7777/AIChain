@@ -112,7 +112,8 @@ def main(argv: list[str] | None = None) -> int:
         if r.status_code >= 400:
             print(f"error {r.status_code}: {r.text}", file=sys.stderr)
             return 1
-        print(f"{args.node} unpaused (was: {r.json()['was']})")
+        body = r.json()
+        print(f"{args.node} unpaused (was: {body['was']})" if "was" in body else body.get("detail", body))
         return 0
     if args.cmd == "proposals":
         r = client.get("/admin/v1/proposals", params={"state": "all" if args.all else "open"})
