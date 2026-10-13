@@ -170,3 +170,21 @@ def test_admin_action_while_network_is_busy_is_accepted(tmp_path):
                    headers={"Authorization": "Bearer adm"})
     r = c.post("/admin/v1/nodes/n2/tick", json={"kind": "economy_tick"})
     assert r.status_code == 202 and r.json()["accepted"] is True
+
+
+def test_nodes_can_ask_peers_from_research_once_a_day():
+    net = build_network("scripted", web=SearchGateway(FakeWebProvider()))
+    n1 = net.nodes["n1"]
+    n1.current_event = QueuedEvent(5, 0, "research_tick", {})
+    assert "ask" in n1.tool_names()
+    q = {"question": {"title": "t", "body": "b", "acceptance_criteria": "c"}, "reward_P": 5, "tags": ["x"]}
+    assert "현상금 생성" in n1._exec_tool("ask", json.dumps(q))
+    n1.policy.start_episode()
+    assert "1/day" in n1._exec_tool("ask", json.dumps(q))
+    # A Bridge client's question is not the node's own and is not limited this way.
+    n1.policy.start_episode()
+    n1.current_event = QueuedEvent(1, 0, "bridge_question", {})
+    assert "현상금 생성" in n1._exec_tool("ask", json.dumps(q))
+    n1.current_event = None
+    assert n1.policy.dump()["self_asks"]
+    assert "다른 노드의 관심사" in n1.render_event(QueuedEvent(5, 0, "research_tick", {}))

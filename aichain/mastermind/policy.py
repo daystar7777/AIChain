@@ -22,6 +22,7 @@ class PolicyLimits:
     writes_per_episode: int = 4
     disputes_per_day: int = 5
     pause_after_violations: int = 10
+    self_asks_per_day: int = 1  # bounties a node posts on its own (not for a Bridge client)
 
 
 @dataclass
@@ -31,6 +32,7 @@ class PolicyGuard:
     spends: list[tuple[int, int]] = field(default_factory=list)  # (height, amount_mP)
     disputes: list[int] = field(default_factory=list)  # heights
     ratings: list[tuple[int, str]] = field(default_factory=list)  # (height, subject)
+    self_asks: list[int] = field(default_factory=list)  # heights
     writes_this_episode: int = 0
     consecutive_violations: int = 0
     paused: bool = False
@@ -68,6 +70,10 @@ class PolicyGuard:
         if len(recent) >= self.limits.disputes_per_day:
             self._violate(f"dispute limit {self.limits.disputes_per_day}/day reached")
 
+    def check_self_ask(self, height: int) -> None:
+        if sum(1 for x in self.self_asks if x > height - BLOCKS_PER_DAY) >= self.limits.self_asks_per_day:
+            self._violate(f"own questions are limited to {self.limits.self_asks_per_day}/day")
+
     def check_rating(self, subject: str, height: int) -> None:
         if any(s == subject and h > height - BLOCKS_PER_DAY for h, s in self.ratings):
             self._violate(f"already rated {subject} today (1 per subject per day)")
@@ -93,11 +99,13 @@ class PolicyGuard:
 
     def dump(self) -> dict:
         return {"spends": self.spends[-500:], "disputes": self.disputes[-100:], "ratings": self.ratings[-200:],
+                "self_asks": self.self_asks[-50:],
                 "consecutive_violations": self.consecutive_violations, "paused": self.paused}
 
     def restore(self, d: dict) -> None:
         self.spends = [tuple(x) for x in d.get("spends", [])]
         self.disputes = list(d.get("disputes", []))
         self.ratings = [tuple(x) for x in d.get("ratings", [])]
+        self.self_asks = list(d.get("self_asks", []))
         self.consecutive_violations = int(d.get("consecutive_violations", 0))
         self.paused = bool(d.get("paused", False))

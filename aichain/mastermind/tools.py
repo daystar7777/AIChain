@@ -383,7 +383,7 @@ EVENT_TOOLS: dict[str, set[str]] = {
     "bounty_new": {"answer", "search", "fetch", "note", "offers", "offer_buy"} | _TOOLS_USE,
     "judge_due": {"judge", "rate", "dispute"} | _TOOLS_USE,
     "review_settled": {"dispute", "rate"} | _TOOLS_USE,
-    "research_tick": {"search", "fetch", "note", "offer_create", "offers", "offer_buy", "subscriptions"} | _TOOLS_USE,
+    "research_tick": {"ask", "search", "fetch", "note", "offer_create", "offers", "offer_buy", "subscriptions"} | _TOOLS_USE,
     "reflect": {"persona_edit", "note"},
     "proposal_open": {"vote", "propose"},
     "tool_request_new": _TOOLS_BUILD | _TOOLS_USE,
