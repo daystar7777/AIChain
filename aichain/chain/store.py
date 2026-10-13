@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from aichain.board import Board, BoardError
+from aichain.board import RULES_LATEST, Board, BoardError
 from aichain.chain.crypto import KeyStore, hash_obj, merkle_root, verify
 from aichain.chain.errors import ChainHalted
 
@@ -45,7 +45,8 @@ SENDER_FIELD = {"open_account": None, "create_bounty": "asker", "commit_answer":
                 "confirm_delivery": "buyer", "subscribe": "subscriber", "sub_deliver": "seller",
                 "cancel_subscription": "subscriber", "create_loan_request": "borrower",
                 "cancel_loan_request": "borrower", "fund_loan": "lender", "repay_loan": "borrower",
-                "deposit_savings": "owner", "withdraw_savings": "owner", "transfer": "sender"}
+                "deposit_savings": "owner", "withdraw_savings": "owner", "transfer": "sender",
+                "upgrade_rules": None, "close_proposal": None, "block_tool": None}
 
 
 class ReplayMismatch(Exception):
@@ -189,6 +190,7 @@ def _block_header(board: Board, st: ChainState, now_ms: int) -> dict[str, Any]:
 
 def replay(board: Board, store: ChainStore, st: ChainState | None = None) -> dict[str, int]:
     st = st or ChainState(store.get_meta("root_pubkey") or "")
+    board.rules = 1  # every log starts under rules 1 (see attach)
     txs = blocks = roots = 0
     entries = store.entries()
     last_block = max((i for i, e in enumerate(entries) if e[0] == "block"), default=-1)
@@ -233,6 +235,8 @@ def attach(board: Board, store: ChainStore, keys: KeyStore | None = None) -> dic
     elif root_pub != keys.pubkey(ROOT_ACCOUNT):
         raise ReplayMismatch("the root key does not match the one this chain was created with")
     st = ChainState(root_pub)
+    # Every log starts under rules 1; `upgrade_rules` transactions in it move the board forward,
+    # so old blocks replay under the rules they were made with.
     stats = replay(board, store, st)
     board.chain_state = st
 
@@ -271,4 +275,7 @@ def attach(board: Board, store: ChainStore, keys: KeyStore | None = None) -> dic
         return events
 
     board._on_block = on_block
+    if board.rules < RULES_LATEST and not board.halted:
+        board.upgrade_rules(RULES_LATEST)  # recorded and signed by root like any transaction
+        stats["rules_upgraded_to"] = RULES_LATEST
     return stats

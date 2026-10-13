@@ -8,8 +8,8 @@ from aichain.reputation import for_board
 from aichain.sim.factory import build_network
 
 
-def board():
-    b = Board(Params(issuance=False))
+def board(rules=None):
+    b = Board(Params(issuance=False)) if rules is None else Board(Params(issuance=False), rules=rules)
     b.open_account("lender", 100_000)
     b.open_account("borrower", 10_000)
     return b
@@ -30,8 +30,9 @@ def test_auto_repay_at_due():
     assert b.total_supply_check()
 
 
-def test_default_gives_collateral_and_hurts_reliability():
-    b = board()
+@pytest.mark.parametrize("rules,lender_after", [(1, 85_000), (2, 90_000)])
+def test_default_gives_collateral_and_hurts_reliability(rules, lender_after):
+    b = board(rules)
     loan = b.create_loan_request("borrower", 20_000, 2_000, 5_000, 720, "t")
     b.fund_loan("lender", loan.loan_id)
     b.accounts["borrower"].balance_mP -= 20_000  # spent the loan
@@ -39,7 +40,9 @@ def test_default_gives_collateral_and_hurts_reliability():
     before = for_board(b, "borrower").terms_e6["J"]
     b.advance(720)
     assert loan.state == "DEFAULTED"
-    assert b.accounts["lender"].balance_mP == 85_000  # lent 20P, got 5P collateral
+    # Lent 20P. Rules 1: only the 5P collateral. Rules 2: the 5P still in the borrower's
+    # balance is taken first, then the 5P collateral.
+    assert b.accounts["lender"].balance_mP == lender_after
     assert for_board(b, "borrower").terms_e6["J"] < before
     assert b.total_supply_check()
 

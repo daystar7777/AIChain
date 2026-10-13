@@ -8,6 +8,7 @@ All amounts are integer mP.
 
 from __future__ import annotations
 
+import bisect
 import functools
 import inspect
 from dataclasses import asdict, dataclass, field
@@ -16,6 +17,37 @@ from typing import Any, Callable
 
 from aichain.common import canonical_json, sha256_hex
 from aichain.reputation import INCOME_KINDS
+from aichain import reputation
+
+# Consensus rules version. A chain starts at rules 1 (the behaviour every block before the first
+# `upgrade_rules` transaction was made with) and moves forward only through that root-signed
+# transaction, so replaying old blocks always applies the rules they were made under.
+# 2: per-answer bonds, dispute holds, void deal disputes refund, loan default caps and request
+#    expiry, delivered-purchase timeout, pairwise-netted contribution income, bounty options.
+RULES_LATEST = 2
+# Fields added after rules 1, with their defaults. They are left out of the state root while they
+# hold the default, so a rules-1 state hashes exactly as it did before they existed.
+LATE_FIELDS: dict[str, dict[str, Any]] = {
+    "Answer": {"bond_mP": None},
+    "Bounty": {"min_rep_e6": None},
+    "Dispute": {"held_mP": 0},
+    "Loan": {"request_until": None},
+    "Purchase": {"confirm_until": None},
+    "ToolListing": {"blocked": False},
+    "Proposal": {"closed_hash": None},
+}
+INCOME_WINDOW_EPOCHS = 24  # rules 2: pairwise netting window for contribution income (one day)
+LOAN_DEFAULT_PENALTY_BP = 1000  # rules 2: a defaulted lender recovers at most owed + 10%
+LOAN_REQUEST_BLOCKS = 17_280  # rules 2: an unfunded loan request expires after one day
+CONFIRM_BLOCKS = 720  # rules 2: a delivered purchase not confirmed within an hour completes
+
+
+def _enc(obj: Any) -> dict[str, Any]:
+    d = asdict(obj)
+    for key, default in LATE_FIELDS.get(type(obj).__name__, {}).items():
+        if d.get(key) == default:
+            d.pop(key, None)
+    return d
 
 
 class BoardError(Exception):
@@ -85,6 +117,7 @@ class Answer:
     revealed: bool = False
     body_hash: str | None = None
     rejected_reason: str | None = None
+    bond_mP: int | None = None  # rules 2: the bond actually paid (rules 1 used the live parameter)
 
 
 @dataclass
@@ -106,6 +139,7 @@ class Bounty:
     answers: list[str] = field(default_factory=list)
     # Locked settlement payments [account, amount_mP]: what an upheld dispute can claw back.
     payouts: list[list] = field(default_factory=list)
+    min_rep_e6: int | None = None  # rules 2: answerers need at least this reputation
 
 
 @dataclass
@@ -122,6 +156,9 @@ class Dispute:
     bounty_id: str | None = None
     state: str = "open"  # open | upheld | rejected | void
     ruling_hash: str | None = None
+    # rules 2: the defendant's funds moved into escrow while the dispute is open, so an upheld
+    # ruling can still recover them after the settlement lock has expired.
+    held_mP: int = 0
 
 
 @dataclass
@@ -163,6 +200,7 @@ class Proposal:
     state: str = "VOTING"  # VOTING TIMELOCK APPROVED ACTIVATED IMPLEMENTING REJECTED EXPIRED VETOED
     votes: dict[str, str] = field(default_factory=dict)  # voter -> yes | no | abstain
     tally: dict[str, int] | None = None
+    closed_hash: str | None = None  # operator's note when an IMPLEMENTING proposal is closed
 
 
 @dataclass
@@ -219,6 +257,7 @@ class Purchase:
     ciphertext_hash: str | None = None
     released_height: int | None = None
     until: int | None = None  # storage leases: end of the lease
+    confirm_until: int | None = None  # rules 2: a delivery not confirmed by then completes
 
 
 @dataclass
@@ -256,6 +295,7 @@ class Loan:
     lender: str | None = None
     due: int | None = None
     settled_height: int | None = None
+    request_until: int | None = None  # rules 2: an unfunded request expires (collateral returned)
 
 
 @dataclass
@@ -281,6 +321,7 @@ class ToolListing:
     price_call_mP: int
     published_height: int
     withdrawn: bool = False
+    blocked: bool = False  # operator block: no new licenses and no further paid calls
 
 
 @dataclass
@@ -318,8 +359,11 @@ def commitment_of(body_hash: str, salt: str, author: str) -> str:
 
 
 class Board:
-    def __init__(self, params: Params | None = None) -> None:
+    def __init__(self, params: Params | None = None, rules: int = RULES_LATEST) -> None:
         self.params = params or Params()
+        # A fresh in-memory board uses the latest rules; the chain store resets this to 1 before
+        # replaying a log and moves it forward with `upgrade_rules` (see chain/store.py attach).
+        self.rules = rules
         self.height = 0
         self.accounts: dict[str, Account] = {}
         self.bounties: dict[str, Bounty] = {}
@@ -363,6 +407,13 @@ class Board:
             raise BoardError(f"unknown transaction type {tx_type}")
         return method(**body)
 
+    @transaction
+    def upgrade_rules(self, version: int) -> None:
+        """Root moves the chain to newer consensus rules from this height on (signed by root)."""
+        if not self.rules < version <= RULES_LATEST:
+            raise BoardError(f"rules {version} cannot follow rules {self.rules}")
+        self.rules = version
+
     def state_root(self) -> str:
         """Hash of the whole consensus state; equal on every honest replay (03/01 docs)."""
         state = {
@@ -370,24 +421,26 @@ class Board:
             "issued": self.issued_mP, "seq": self._seq,
             "accounts": {k: [a.balance_mP, a.locked_mP, sorted(a.locks), a.pubkey]
                          for k, a in sorted(self.accounts.items())},
-            "bounties": {k: {**asdict(b), "state": str(b.state),
+            "bounties": {k: {**_enc(b), "state": str(b.state),
                              "outcome": str(b.outcome) if b.outcome else None}
                          for k, b in sorted(self.bounties.items())},
-            "answers": {k: asdict(a) for k, a in sorted(self.answers.items())},
+            "answers": {k: _enc(a) for k, a in sorted(self.answers.items())},
             "rep_events": sha256_hex(canonical_json(self.rep_events)),
-            "tools": {f"{k[0]}@{k[1]}": asdict(v) for k, v in sorted(self.tools.items())},
+            "tools": {f"{k[0]}@{k[1]}": _enc(v) for k, v in sorted(self.tools.items())},
             "licenses": sorted(self.licenses),
-            "disputes": {k: asdict(v) for k, v in sorted(self.disputes.items())},
-            "ratings": {k: asdict(v) for k, v in sorted(self.ratings.items())},
-            "proposals": {k: asdict(v) for k, v in sorted(self.proposals.items())},
+            "disputes": {k: _enc(v) for k, v in sorted(self.disputes.items())},
+            "ratings": {k: _enc(v) for k, v in sorted(self.ratings.items())},
+            "proposals": {k: _enc(v) for k, v in sorted(self.proposals.items())},
             "params": asdict(self.params),
-            "tool_requests": {k: asdict(v) for k, v in sorted(self.tool_requests.items())},
-            "offers": {k: asdict(v) for k, v in sorted(self.offers.items())},
-            "purchases": {k: asdict(v) for k, v in sorted(self.purchases.items())},
-            "subscriptions": {k: asdict(v) for k, v in sorted(self.subscriptions.items())},
-            "loans": {k: asdict(v) for k, v in sorted(self.loans.items())},
-            "deposits": {k: asdict(v) for k, v in sorted(self.deposits.items())},
+            "tool_requests": {k: _enc(v) for k, v in sorted(self.tool_requests.items())},
+            "offers": {k: _enc(v) for k, v in sorted(self.offers.items())},
+            "purchases": {k: _enc(v) for k, v in sorted(self.purchases.items())},
+            "subscriptions": {k: _enc(v) for k, v in sorted(self.subscriptions.items())},
+            "loans": {k: _enc(v) for k, v in sorted(self.loans.items())},
+            "deposits": {k: _enc(v) for k, v in sorted(self.deposits.items())},
         }
+        if self.rules > 1:
+            state["rules"] = self.rules
         return sha256_hex(canonical_json(state))
 
     def account(self, account_id: str) -> Account:
@@ -400,6 +453,23 @@ class Board:
         """issued == balances + escrow + burned (03 doc 6: supply = issued - burned)."""
         held = sum(a.balance_mP for a in self.accounts.values())
         return held + self.escrow_mP + self.burned_mP == self.issued_mP
+
+    def escrow_obligations(self) -> int:
+        """What escrow must hold right now, item by item; equal to `escrow_mP` when the books are
+        right (used by the self-audit and the invariant tests)."""
+        open_bounty = {BountyState.OPEN, BountyState.REVEAL, BountyState.JUDGING}
+        total = sum(b.reward_mP for b in self.bounties.values() if b.state in open_bounty)
+        total += sum(self._bond_of(a) for a in self.answers.values() if not a.revealed
+                     and self.bounties[a.bounty_id].state in (BountyState.OPEN, BountyState.REVEAL))
+        total += sum(d.bond_mP + d.held_mP for d in self.disputes.values() if d.state == "open")
+        total += sum(p.price_mP for p in self.purchases.values()
+                     if p.state in ("PENDING", "DELIVERED", "DISPUTED"))
+        total += sum(x.price_mP for x in self.subscriptions.values() if x.state == "ACTIVE")
+        total += sum(x.collateral_mP for x in self.loans.values() if x.state in ("REQUESTED", "ACTIVE"))
+        total += sum(d.amount_mP + d.earned_mP for d in self.deposits.values() if d.state == "LOCKED")
+        total += sum(r.reward_mP for r in self.tool_requests.values() if r.state == "OPEN")
+        total += sum(p.deposit_mP for p in self.proposals.values() if p.state in ("VOTING", "TIMELOCK"))
+        return total
 
     def _new_id(self, prefix: str, *parts: Any) -> str:
         self._seq += 1
@@ -440,7 +510,12 @@ class Board:
         tags: list[str],
         max_answers: int | None = None,
         commit_blocks: int | None = None,
+        reveal_blocks: int | None = None,
+        judge_blocks: int | None = None,
+        min_rep_e6: int | None = None,
     ) -> Bounty:
+        """Rules 2 add per-bounty reveal/judge periods and a minimum answerer reputation
+        (03 doc 3.1); older transactions never carry them, so they replay unchanged."""
         p = self.params
         acct = self.account(asker)
         if reward_mP < p.min_reward_mP:
@@ -454,9 +529,18 @@ class Board:
         lo, hi = p.commit_blocks_range
         if not lo <= commit_blocks <= hi:
             raise BoardError(f"commit_blocks must be between {lo} and {hi}")
+        if (reveal_blocks, judge_blocks, min_rep_e6) != (None, None, None) and self.rules < 2:
+            raise BoardError("reveal_blocks, judge_blocks and min_rep_e6 need rules 2")
+        for name, v in (("reveal_blocks", reveal_blocks), ("judge_blocks", judge_blocks)):
+            if v is not None and not 12 <= v <= 17_280:
+                raise BoardError(f"{name} must be between 12 and 17280")
+        reveal_blocks = p.reveal_blocks if reveal_blocks is None else reveal_blocks
+        judge_blocks = p.judge_blocks if judge_blocks is None else judge_blocks
+        if min_rep_e6 is not None and not 0 <= min_rep_e6 <= 900_000:
+            raise BoardError("min_rep_e6 must be between 0 and 900000 (0.90)")
         self._debit_to_escrow(acct, reward_mP)
         commit_until = self.height + commit_blocks
-        reveal_until = commit_until + p.reveal_blocks
+        reveal_until = commit_until + reveal_blocks
         bounty = Bounty(
             bounty_id=self._new_id("b_", asker, question_hash),
             asker=asker,
@@ -467,7 +551,8 @@ class Board:
             created_at=self.height,
             commit_until=commit_until,
             reveal_until=reveal_until,
-            judge_until=reveal_until + p.judge_blocks,
+            judge_until=reveal_until + judge_blocks,
+            min_rep_e6=min_rep_e6,
         )
         self.bounties[bounty.bounty_id] = bounty
         return bounty
@@ -489,13 +574,17 @@ class Board:
             raise BoardError("already answered this bounty")
         if len(b.answers) >= b.max_answers:
             raise BoardError("bounty has reached max_answers")
-        self._debit_to_escrow(self.account(author), self.params.commit_bond_mP)
+        if b.min_rep_e6 is not None and reputation.for_board(self, author).value_e6 < b.min_rep_e6:
+            raise BoardError(f"this bounty needs reputation of at least {b.min_rep_e6 / 1e6:.2f}")
+        bond = self.params.commit_bond_mP
+        self._debit_to_escrow(self.account(author), bond)
         ans = Answer(
             answer_id=self._new_id("a_", author, bounty_id, commitment),
             bounty_id=bounty_id,
             author=author,
             commitment=commitment,
             committed_at=self.height,
+            bond_mP=bond if self.rules >= 2 else None,
         )
         self.answers[ans.answer_id] = ans
         b.answers.append(ans.answer_id)
@@ -516,7 +605,12 @@ class Board:
         ans.revealed = True
         ans.body_hash = body_hash
         # Revealing returns the commit bond.
-        self._pay_from_escrow(author, self.params.commit_bond_mP, lock=False)
+        self._pay_from_escrow(author, self._bond_of(ans), lock=False)
+
+    def _bond_of(self, ans: Answer) -> int:
+        """Rules 1 read the live parameter, so a governance change in between minted or burned the
+        difference; rules 2 refund or burn exactly what was paid."""
+        return ans.bond_mP if ans.bond_mP is not None else self.params.commit_bond_mP
 
     def _judgeable(self, asker: str, bounty_id: str, answer_id: str) -> tuple[Bounty, Answer]:
         b = self.bounty(bounty_id)
@@ -544,7 +638,8 @@ class Board:
             raise BoardError("cannot accept a rejected answer")
         b.accepted = answer_id
         self._pay_from_escrow(ans.author, b.reward_mP, lock=True, bounty=b)
-        self._rep(ans.author, "answer_accepted", bounty_id=bounty_id, value_mP=b.reward_mP)
+        self._rep(ans.author, "answer_accepted", bounty_id=bounty_id, value_mP=b.reward_mP,
+                  **self._payer(asker))
         self._rep(asker, "judge_ok", bounty_id=bounty_id)
         return [self._settle(b, BountyState.PAID)]
 
@@ -627,6 +722,11 @@ class Board:
         self._debit_to_escrow(self.account(opener), bond)
         d = Dispute(self._new_id("d_", opener, target_id), opener, target_kind, target_id, claim_hash,
                     bond, defendant, h, h + p.dispute_resolve_blocks, bounty_id)
+        if self.rules >= 2 and amount > 0:
+            # The settlement lock (dispute_blocks) is shorter than the ruling deadline, so hold the
+            # disputed amount in escrow now; an upheld ruling then recovers it in full.
+            d.held_mP = self._take_back(defendant, amount)
+            self.escrow_mP += d.held_mP
         self.disputes[d.dispute_id] = d
         return d
 
@@ -643,6 +743,9 @@ class Board:
 
     def _settle_dispute(self, d: Dispute, ruling: str, ruling_hash: str | None) -> None:
         d.ruling_hash = ruling_hash
+        if self.rules >= 2:
+            self._settle_dispute_v2(d, ruling)
+            return
         if ruling == "void":
             d.state = "void"
             self._pay_from_escrow(d.opener, d.bond_mP, lock=False)
@@ -701,6 +804,77 @@ class Board:
             pu = self.purchases[d.target_id]
             taken = self._take_back(pu.seller, pu.price_mP)
             self.account(pu.buyer).balance_mP += taken
+            pu.state = "REFUNDED"
+            self._rep(pu.seller, "dispute_lost_deal", dispute_id=d.dispute_id)
+        elif d.target_kind == "rating":
+            self.ratings[d.target_id].void = True
+            for e in self.rep_events:
+                if e["kind"] == "rated" and e.get("rating_id") == d.target_id:
+                    e["kind"] = "rated_void"
+
+    def _settle_dispute_v2(self, d: Dispute, ruling: str) -> None:
+        if d.target_kind == "deal" and self.purchases[d.target_id].state == "DISPUTED":
+            pu = self.purchases[d.target_id]  # automatic dispute: payment still in escrow, bond 0
+            self._pay_from_escrow(d.opener, d.bond_mP, lock=False)
+            if ruling == "reject":
+                d.state = "rejected"
+                self._complete_purchase(pu)
+                return
+            # Upheld, or nobody ruled in time: the buyer never got content matching the commitment.
+            d.state = "upheld" if ruling == "uphold" else "void"
+            pu.state = "REFUNDED"
+            self._pay_from_escrow(pu.buyer, pu.price_mP, lock=False)
+            if ruling == "uphold":
+                self._rep(pu.seller, "dispute_lost_deal", dispute_id=d.dispute_id)
+            return
+        if ruling in ("void", "reject"):
+            self._pay_from_escrow(d.defendant, d.held_mP, lock=False)  # the hold goes back
+            if ruling == "void":
+                d.state = "void"
+                self._pay_from_escrow(d.opener, d.bond_mP, lock=False)
+                return
+            d.state = "rejected"
+            half = d.bond_mP // 2
+            self._burn_from_escrow(d.bond_mP - half)
+            self._pay_from_escrow(d.defendant, half, lock=False)
+            self._rep(d.opener, "dispute_lost", dispute_id=d.dispute_id)
+            self._rep(d.defendant, "dispute_won_defense", dispute_id=d.dispute_id)
+            return
+        d.state = "upheld"
+        self._pay_from_escrow(d.opener, d.bond_mP, lock=False)
+        self._rep(d.opener, "dispute_won", dispute_id=d.dispute_id)
+
+        def recover(amount: int) -> int:
+            """The held amount plus whatever more the defendant still has, now in escrow."""
+            extra = self._take_back(d.defendant, max(0, amount - d.held_mP))
+            self.escrow_mP += extra
+            return d.held_mP + extra
+
+        if d.target_kind == "answer":
+            b = self.bounty(d.bounty_id)
+            taken = recover(sum(a for acct, a in b.payouts if acct == d.defendant))
+            finder = taken // 5
+            self._pay_from_escrow(d.opener, finder, lock=False)
+            self._pay_from_escrow(b.asker, taken - finder, lock=False)
+            b.payouts = [x for x in b.payouts if x[0] != d.defendant]
+            self._rep(d.defendant, "dispute_lost_answer", dispute_id=d.dispute_id)
+        elif d.target_kind == "rejection":
+            b = self.bounty(d.bounty_id)
+            revealed = sum(1 for a in b.answers if self.answers[a].revealed)
+            self._pay_from_escrow(d.opener, recover(b.reward_mP // max(revealed, 1)), lock=False)
+            self._rep(b.asker, "dispute_lost_rejection", dispute_id=d.dispute_id)
+            for e in self.rep_events:  # the rejection no longer counts against the author
+                if e["kind"] == "answer_rejected" and e["account"] == d.opener and e.get("bounty_id") == b.bounty_id:
+                    e["kind"] = "answer_rejected_overturned"
+        elif d.target_kind == "tool":
+            tool_id, _, ver = d.target_id.rpartition("@")
+            listing = self.tools[(tool_id, int(ver))]
+            self._pay_from_escrow(d.opener, recover(listing.price_install_mP), lock=False)
+            listing.withdrawn = True
+            self._rep(listing.author, "dispute_lost_tool", dispute_id=d.dispute_id)
+        elif d.target_kind == "deal":
+            pu = self.purchases[d.target_id]
+            self._pay_from_escrow(pu.buyer, recover(pu.price_mP), lock=False)
             pu.state = "REFUNDED"
             self._rep(pu.seller, "dispute_lost_deal", dispute_id=d.dispute_id)
         elif d.target_kind == "rating":
@@ -853,7 +1027,28 @@ class Board:
         return BoardEvent("proposal_approved", None, {"proposal_id": prop.proposal_id,
                                                       "state": prop.state, "changes": prop.changes})
 
+    @transaction
+    def close_proposal(self, closer: str, proposal_id: str, outcome: str, note_hash: str) -> None:
+        """Root closes an approved policy/upgrade proposal once people implemented (or dropped) it
+        (06 doc 4). Signed by root."""
+        prop = self.proposals.get(proposal_id)
+        if prop is None or prop.state != "IMPLEMENTING":
+            raise BoardError("only IMPLEMENTING proposals can be closed")
+        if outcome not in ("implemented", "abandoned"):
+            raise BoardError("outcome must be implemented or abandoned")
+        prop.state = "IMPLEMENTED" if outcome == "implemented" else "ABANDONED"
+        prop.closed_hash = note_hash
+
     # ---- tool market (05 doc ch. 2–3, 01 doc 3.2) ----
+
+    @transaction
+    def block_tool(self, blocker: str, tool_id: str, version: int, reason_hash: str) -> None:
+        """Operator block (05 doc 4.3), signed by root: withdrawn, no new licenses, no paid calls."""
+        listing = self._listing(tool_id, version)
+        if listing.blocked:
+            raise BoardError("tool is already blocked")
+        listing.blocked = listing.withdrawn = True
+        self._rep(listing.author, "tool_blocked", tool_id=tool_id, version=version, reason_hash=reason_hash)
 
     @transaction
     def publish_tool(self, author: str, tool_id: str, version: int, code_hash: str,
@@ -902,19 +1097,21 @@ class Board:
         self._transfer(buyer, listing.author, listing.price_install_mP)
         self.licenses.add((buyer, tool_id, version))
         self._rep(listing.author, "tool_licensed", tool_id=tool_id, version=version,
-                  value_mP=listing.price_install_mP)
+                  value_mP=listing.price_install_mP, **self._payer(buyer))
 
     @transaction
     def pay_tool_use(self, user: str, tool_id: str, version: int, calls: int) -> None:
         listing = self._listing(tool_id, version)
         if (user, tool_id, version) not in self.licenses:
             raise BoardError("no license for this tool version")
+        if listing.blocked:
+            raise BoardError("this tool version was blocked by the operator")
         if not 1 <= calls <= 100:
             raise BoardError("calls must be 1..100")
         amount = calls * listing.price_call_mP
         self._transfer(user, listing.author, amount)
         self._rep(listing.author, "tool_called", tool_id=tool_id, version=version,
-                  calls=calls, value_mP=amount)
+                  calls=calls, value_mP=amount, **self._payer(user))
 
     # ---- deal market: sell offers and purchases ----
 
@@ -980,6 +1177,8 @@ class Board:
         if p is None or p.seller != seller or p.state != "PENDING":
             raise BoardError("no pending purchase to deliver")
         p.state, p.ciphertext_hash = "DELIVERED", ciphertext_hash
+        if self.rules >= 2:
+            p.confirm_until = self.height + CONFIRM_BLOCKS
 
     @transaction
     def confirm_delivery(self, buyer: str, purchase_id: str, ok: bool, reason_hash: str) -> Purchase:
@@ -988,21 +1187,25 @@ class Board:
         if p is None or p.buyer != buyer or p.state != "DELIVERED":
             raise BoardError("no delivered purchase to confirm")
         if ok:
-            p.state, p.released_height = "COMPLETED", self.height
-            self._pay_from_escrow(p.seller, p.price_mP, lock=True)
-            offer = self.offers[p.offer_id]
-            offer.sold += 1
-            if offer.kind != "info":
-                offer.state = "SOLD"
-            if offer.kind == "storage":
-                p.until = self.height + offer.period_blocks
-            self._rep(p.seller, "info_sold", offer_id=p.offer_id, value_mP=p.price_mP, offer_kind=offer.kind)
+            self._complete_purchase(p)
         else:  # content does not match the commitment: the operator decides, payment stays escrowed
             p.state = "DISPUTED"
             d = Dispute(self._new_id("d_", buyer, purchase_id), buyer, "deal", purchase_id, reason_hash, 0,
                         p.seller, self.height, self.height + self.params.dispute_resolve_blocks)
             self.disputes[d.dispute_id] = d
         return p
+
+    def _complete_purchase(self, p: Purchase) -> None:
+        p.state, p.released_height = "COMPLETED", self.height
+        self._pay_from_escrow(p.seller, p.price_mP, lock=True)
+        offer = self.offers[p.offer_id]
+        offer.sold += 1
+        if offer.kind != "info":
+            offer.state = "SOLD"
+        if offer.kind == "storage":
+            p.until = self.height + offer.period_blocks
+        self._rep(p.seller, "info_sold", offer_id=p.offer_id, value_mP=p.price_mP, offer_kind=offer.kind,
+                  **self._payer(p.buyer))
 
     # ---- subscriptions ----
 
@@ -1044,7 +1247,7 @@ class Board:
             self._pay_from_escrow(sub.seller, sub.price_mP, lock=True)
             sub.periods_paid += 1
             self._rep(sub.seller, "info_sold", offer_id=sub.offer_id, value_mP=sub.price_mP,
-                      offer_kind="subscription")
+                      offer_kind="subscription", **self._payer(sub.subscriber))
         else:
             self._pay_from_escrow(sub.subscriber, sub.price_mP, lock=False)
             sub.periods_refunded += 1
@@ -1070,6 +1273,8 @@ class Board:
             self._debit_to_escrow(self.account(borrower), collateral_mP)
         loan = Loan(self._new_id("l_", borrower, principal_mP), borrower, principal_mP, interest_mP,
                     collateral_mP, term_blocks, terms_hash, self.height)
+        if self.rules >= 2:
+            loan.request_until = self.height + LOAN_REQUEST_BLOCKS
         self.loans[loan.loan_id] = loan
         return loan
 
@@ -1089,6 +1294,7 @@ class Board:
         if lender == loan.borrower:
             raise BoardError("cannot lend to yourself")
         self._transfer(lender, loan.borrower, loan.principal_mP)
+        self._flow(lender, loan.borrower, loan.principal_mP, loan_id=loan_id)
         loan.state, loan.lender, loan.due = "ACTIVE", lender, self.height + loan.term_blocks
         return loan
 
@@ -1106,11 +1312,26 @@ class Board:
         owed = loan.principal_mP + loan.interest_mP
         if self.account(loan.borrower).available_mP >= owed:
             self._transfer(loan.borrower, loan.lender, owed)
+            self._flow(loan.borrower, loan.lender, owed, loan_id=loan.loan_id)
             self._pay_from_escrow(loan.borrower, loan.collateral_mP, lock=False)
             loan.state, loan.settled_height = "REPAID", self.height
             self._rep(loan.borrower, "loan_repaid", loan_id=loan.loan_id)
             if loan.interest_mP:
                 self._rep(loan.lender, "loan_interest", loan_id=loan.loan_id, value_mP=loan.interest_mP)
+        elif at_due and self.rules >= 2:
+            # Default: the lender takes what the borrower can pay now, then up to the rest of the
+            # debt plus a 10% penalty from the collateral; any collateral beyond that goes back.
+            paid_now = self.account(loan.borrower).available_mP
+            if paid_now > 0:
+                self._transfer(loan.borrower, loan.lender, paid_now)
+            claim = owed - paid_now + owed * LOAN_DEFAULT_PENALTY_BP // 10_000
+            seized = min(loan.collateral_mP, claim)
+            self._pay_from_escrow(loan.lender, seized, lock=False)
+            self._pay_from_escrow(loan.borrower, loan.collateral_mP - seized, lock=False)
+            self._flow(loan.borrower, loan.lender, paid_now + seized, loan_id=loan.loan_id)
+            loan.state, loan.settled_height = "DEFAULTED", self.height
+            self._rep(loan.borrower, "loan_default", loan_id=loan.loan_id, owed_mP=owed,
+                      recovered_mP=paid_now + seized)
         elif at_due:
             self._pay_from_escrow(loan.lender, loan.collateral_mP, lock=False)
             loan.state, loan.settled_height = "DEFAULTED", self.height
@@ -1204,7 +1425,7 @@ class Board:
             self._pay_from_escrow(sub["seller"], req.reward_mP, lock=True)
             self.licenses.add((req.buyer, tool_id, version))
             self._rep(sub["seller"], "tool_licensed", tool_id=tool_id, version=version,
-                      value_mP=req.reward_mP, via=request_id)
+                      value_mP=req.reward_mP, via=request_id, **self._payer(req.buyer))
         return req
 
     def storage_leases(self, account: str) -> tuple[int, int]:
@@ -1220,7 +1441,8 @@ class Board:
         return lin, lout
 
     def has_license(self, account: str, tool_id: str, version: int) -> bool:
-        return (account, tool_id, version) in self.licenses
+        listing = self.tools.get((tool_id, version))
+        return (account, tool_id, version) in self.licenses and not (listing and listing.blocked)
 
     @transaction
     def heartbeat(self, account: str, epoch: int) -> None:
@@ -1232,6 +1454,15 @@ class Board:
             raise BoardError("already sent a heartbeat this epoch")
         self._heartbeats.add((account, epoch))
         self._rep(account, "heartbeat", epoch=epoch)
+
+    def _payer(self, payer: str) -> dict[str, str]:
+        """Rules 2 record who paid each income, so issuance can net payments between a pair."""
+        return {"payer": payer} if self.rules >= 2 else {}
+
+    def _flow(self, payer: str, payee: str, amount: int, **extra: Any) -> None:
+        """Rules 2: value moved between accounts outside the income kinds (loans), for netting."""
+        if self.rules >= 2 and amount > 0:
+            self._rep(payee, "flow", payer=payer, value_mP=amount, **extra)
 
     def _rep(self, account: str, kind: str, **extra: Any) -> None:
         self.rep_events.append({"account": account, "kind": kind, "height": self.height, **extra})
@@ -1283,6 +1514,12 @@ class Board:
                 pu.state = "REFUNDED"
                 self._pay_from_escrow(pu.buyer, pu.price_mP, lock=False)
                 events.append(BoardEvent("purchase_refunded", None, {"purchase_id": pu.purchase_id}))
+            elif pu.state == "DELIVERED" and pu.confirm_until is not None and h >= pu.confirm_until:
+                # The buyer's Core never confirmed (crash between deliver and confirm): the seller
+                # delivered on chain, so complete it; the buyer keeps the usual dispute window.
+                self._complete_purchase(pu)
+                events.append(BoardEvent("purchase_completed", None, {"purchase_id": pu.purchase_id,
+                                                                      "reason": "confirm_timeout"}))
         for dep in self.deposits.values():
             if dep.state == "LOCKED" and h >= dep.unlock:
                 self._pay_from_escrow(dep.owner, dep.amount_mP + dep.earned_mP, lock=False)
@@ -1290,7 +1527,12 @@ class Board:
                 events.append(BoardEvent("deposit_matured", None, {"deposit_id": dep.deposit_id,
                                                                    "owner": dep.owner, "earned_mP": dep.earned_mP}))
         for loan in self.loans.values():
-            if loan.state == "ACTIVE" and h >= loan.due:
+            if loan.state == "REQUESTED" and loan.request_until is not None and h >= loan.request_until:
+                loan.state, loan.settled_height = "CANCELLED", h
+                self._pay_from_escrow(loan.borrower, loan.collateral_mP, lock=False)
+                events.append(BoardEvent("loan_expired", None, {"loan_id": loan.loan_id,
+                                                                "borrower": loan.borrower}))
+            elif loan.state == "ACTIVE" and h >= loan.due:
                 self._settle_loan(loan, at_due=True)
                 events.append(BoardEvent("loan_settled", None, {"loan_id": loan.loan_id, "state": loan.state,
                                                                 "borrower": loan.borrower, "lender": loan.lender}))
@@ -1336,12 +1578,18 @@ class Board:
         savings_pool = reward // 10 if savers else 0  # with no deposits the pool is not issued
         uptime_pool = reward * 55 // 100 if savers else reward * 6 // 10
         contrib_pool = reward - uptime_pool - (reward // 10 if savers else 0)
-        alive = sorted({e["account"] for e in self.rep_events
-                        if e["kind"] == "heartbeat" and e.get("epoch") == epoch})
-        income: dict[str, int] = {}
-        for e in self.rep_events:
-            if start <= e["height"] < end and e["kind"] in INCOME_KINDS:
-                income[e["account"]] = income.get(e["account"], 0) + e.get("value_mP", 0)
+        if self.rules >= 2:
+            first = self._events_from(min(start, epoch * 720))
+            alive = sorted({e["account"] for e in self.rep_events[first:]
+                            if e["kind"] == "heartbeat" and e.get("epoch") == epoch})
+            income = self._netted_income(epoch, start, end)
+        else:
+            alive = sorted({e["account"] for e in self.rep_events
+                            if e["kind"] == "heartbeat" and e.get("epoch") == epoch})
+            income = {}
+            for e in self.rep_events:
+                if start <= e["height"] < end and e["kind"] in INCOME_KINDS:
+                    income[e["account"]] = income.get(e["account"], 0) + e.get("value_mP", 0)
         paid: dict[str, int] = {}
         if alive:
             share = uptime_pool // len(alive)
@@ -1370,6 +1618,50 @@ class Board:
             return None
         return BoardEvent("epoch_issued", None, {"epoch": epoch, "paid": paid})
 
+    def _events_from(self, height: int) -> int:
+        """Index of the first reputation event at or after `height` (events are height-ordered)."""
+        return bisect.bisect_left(self.rep_events, height, key=lambda e: e["height"])
+
+    def _netted_income(self, epoch: int, start: int, end: int) -> dict[str, int]:
+        """Contribution income for one epoch with payments between the same two accounts netted
+        over a trailing day (rules 2). Each payer->payee income counts only as far as it exceeds
+        what flowed back the other way (any income, transfer or loan flow) and what was already
+        credited for that pair in the window, so passing points back and forth earns nothing.
+        Income events without a payer (made under rules 1) count as before."""
+        wstart = max(0, end - INCOME_WINDOW_EPOCHS * self.params.epoch_blocks)
+        inc_w: dict[tuple[str, str], int] = {}
+        moved_w: dict[tuple[str, str], int] = {}
+        credited_w: dict[tuple[str, str], int] = {}
+        inc_e: dict[tuple[str, str], int] = {}
+        income: dict[str, int] = {}
+        for e in self.rep_events[self._events_from(wstart):]:
+            if e["height"] >= end:
+                break
+            kind, v = e["kind"], e.get("value_mP", 0)
+            if kind in INCOME_KINDS:
+                if "payer" not in e:
+                    if e["height"] >= start:
+                        income[e["account"]] = income.get(e["account"], 0) + v
+                    continue
+                pair = (e["payer"], e["account"])
+                inc_w[pair] = inc_w.get(pair, 0) + v
+                moved_w[pair] = moved_w.get(pair, 0) + v
+                if e["height"] >= start:
+                    inc_e[pair] = inc_e.get(pair, 0) + v
+            elif kind in ("transfer_in", "flow"):
+                pair = (e.get("payer") or e.get("sender"), e["account"])
+                moved_w[pair] = moved_w.get(pair, 0) + v
+            elif kind == "income_credit":
+                pair = (e["payer"], e["account"])
+                credited_w[pair] = credited_w.get(pair, 0) + v
+        for (payer, payee), v in sorted(inc_e.items()):
+            net = inc_w[(payer, payee)] - moved_w.get((payee, payer), 0) - credited_w.get((payer, payee), 0)
+            counted = max(0, min(v, net))
+            if counted:
+                income[payee] = income.get(payee, 0) + counted
+                self._rep(payee, "income_credit", payer=payer, value_mP=counted, epoch=epoch)
+        return income
+
     def _transition(self, b: Bounty, h: int) -> BoardEvent | None:
         p = self.params
         if b.state == BountyState.OPEN and h >= b.commit_until:
@@ -1380,8 +1672,8 @@ class Board:
             return BoardEvent("reveal_open", None, {"bounty_id": b.bounty_id})
         if b.state == BountyState.REVEAL and h >= b.reveal_until:
             unrevealed = [a for a in b.answers if not self.answers[a].revealed]
-            for _ in unrevealed:
-                self._burn_from_escrow(p.commit_bond_mP)
+            for a in unrevealed:
+                self._burn_from_escrow(self._bond_of(self.answers[a]))
             if len(unrevealed) == len(b.answers):
                 self._pay_from_escrow(b.asker, b.reward_mP, lock=False)
                 return self._settle_expired(b)
@@ -1399,7 +1691,7 @@ class Board:
                 share = pool // len(winners)
                 for w in winners:
                     self._pay_from_escrow(w, share, lock=True, bounty=b)
-                    self._rep(w, "answer_auto", bounty_id=b.bounty_id, value_mP=share)
+                    self._rep(w, "answer_auto", bounty_id=b.bounty_id, value_mP=share, **self._payer(b.asker))
                 self._burn_from_escrow(b.reward_mP - share * len(winners))
                 self._rep(b.asker, "judge_timeout", bounty_id=b.bounty_id)
                 return self._settle(b, BountyState.AUTO_SPLIT)

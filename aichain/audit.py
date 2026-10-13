@@ -27,11 +27,10 @@ def run(board: Any) -> list[str]:
             problems.append(f"{a.id}: locked {a.locked_mP}mP outside 0..balance {a.balance_mP}mP")
         if a.locked_mP != sum(x for x, _ in a.locks):
             problems.append(f"{a.id}: locked {a.locked_mP}mP != sum of locks {sum(x for x, _ in a.locks)}mP")
-    in_escrow = sum(d.amount_mP for d in board.deposits.values() if d.state == "LOCKED")
-    in_escrow += sum(b.reward_mP for b in board.bounties.values()
-                     if str(b.state) in ("OPEN", "REVEAL", "JUDGING"))
-    if in_escrow > board.escrow_mP:
-        problems.append(f"escrow {board.escrow_mP}mP is less than open bounties and deposits {in_escrow}mP")
+    owed = board.escrow_obligations()
+    if owed != board.escrow_mP:
+        problems.append(f"escrow {board.escrow_mP}mP != open obligations {owed}mP (bounties, bonds, "
+                        f"disputes, purchases, subscriptions, loans, deposits, tool requests, proposals)")
     return problems
 
 
