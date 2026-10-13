@@ -5,12 +5,17 @@
 Description=AIChain Telegram bridge (node manager)
 After=aichain-bridge.service
 Wants=aichain-bridge.service
+# Keep retrying (with growing delays) and alert on every failure (aichain-alert@).
+StartLimitIntervalSec=0
+OnFailure=aichain-alert@%n.service
 
 [Service]
 WorkingDirectory=/opt/aichain
 ExecStart=/opt/aichain/.venv/bin/python -m aichain.telegram_bridge
 Restart=on-failure
 RestartSec=15
+RestartSteps=6
+RestartMaxDelaySec=15min
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict

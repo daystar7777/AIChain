@@ -28,3 +28,25 @@ def test_every_service_has_a_memory_ceiling():
         s = settings(path)
         assert "MemoryMax" in s and "MemoryHigh" in s, path.name
         assert size(s["MemoryHigh"][-1]) < size(s["MemoryMax"][-1]) <= 2 << 30, path.name
+
+
+LONG_RUNNING = ["aichain-bridge.service", "aichain-browser.service", "aichain-egress.service",
+                "aichain-journal.service", "aichain-telegram.service"]
+
+
+def test_services_keep_retrying_and_alert_on_failure():
+    for name in LONG_RUNNING:
+        s = settings(UNITS / name)
+        assert s["StartLimitIntervalSec"] == ["0"] and "StartLimitBurst" not in s, name
+        assert s["OnFailure"] == ["aichain-alert@%n.service"], name
+        assert s["Restart"] == ["on-failure"] and "RestartMaxDelaySec" in s, name
+    assert settings(UNITS / "aichain-report.service")["OnFailure"] == ["aichain-alert@%n.service"]
+    alert = settings(UNITS / "aichain-alert@.service")
+    assert "OnFailure" not in alert and "%i" in alert["ExecStart"][0]  # no alert loops
+    assert "TELEGRAM" not in "".join(alert["ExecStart"])  # the token is read from the file, not argv
+
+
+def test_bridge_unit_uses_notify_and_the_watchdog():
+    s = settings(UNITS / "aichain-bridge.service")
+    assert s["Type"] == ["notify"] and int(s["WatchdogSec"][0]) >= 60
+    assert s["TimeoutStartSec"] == ["30min"]  # replaying a long chain log before READY=1

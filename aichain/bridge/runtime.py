@@ -81,8 +81,16 @@ class NetworkRuntime:
         self._last_save = 0.0
         # Called on the simulation thread every loop (e.g. the journal's snapshot timer).
         self.tick_hooks: list[Any] = []
+        # Halted chain: after this many seconds call on_fatal(reason) (the server exits non-zero
+        # so systemd restarts it and replays the log). None: stay up, refusing work (tests).
+        self.halt_exit_seconds: float | None = None
+        self.on_fatal: Any = None
+        # time.monotonic() of the last sign of life: a loop turn, a log entry, an LLM call.
+        # The systemd watchdog pings only while this is recent (aichain.ops.Watchdog).
+        self.progress_at = 0.0
         self._load_state()
         net.listeners.append(self._on_log)
+        net.gateway.observers.append(lambda *_: self._beat())
         self._refresh_snapshot()
 
     # ---- persistence: Bridge question records and Policy Guard history survive restarts ----
@@ -143,19 +151,31 @@ class NetworkRuntime:
             self._thread = None
         self.save_state()
 
+    def _beat(self) -> None:
+        self.progress_at = time.monotonic()
+
     def _loop(self) -> None:
         last_block = time.monotonic()
         failures = 0
-        halt_reported = False
+        halted_at: float | None = None
         while not self._stop.is_set():
+            self._beat()
             if self.net.halted:
-                # Fail closed: stop producing blocks and running episodes; the API keeps answering.
-                if not halt_reported:
-                    halt_reported = True
+                # Fail closed: stop producing blocks and running episodes; the API keeps answering
+                # until the grace period ends, then the process exits and systemd restarts it.
+                exit_in = self.halt_exit_seconds
+                if halted_at is None:
+                    halted_at = time.monotonic()
                     try:
-                        self.net.manager_send("core", f"⛔ 체인이 멈췄어요: {self.net.halted}")
+                        self.net.manager_send("core", f"⛔ 체인이 멈췄어요: {self.net.halted}" + (
+                            f"\n{exit_in:.0f}초 뒤 프로세스를 끝내고 systemd가 다시 시작합니다(체인 로그 재생)."
+                            if exit_in is not None else ""))
+                        self.net.log("runtime", "halted", reason=self.net.halted, exit_in=exit_in)
                     except Exception:
                         pass
+                elif exit_in is not None and time.monotonic() - halted_at >= exit_in and self.on_fatal:
+                    fatal, self.on_fatal = self.on_fatal, None  # once
+                    fatal(self.net.halted)
                 self._refresh_snapshot()
                 self._stop.wait(1.0)
                 continue
@@ -283,6 +303,7 @@ class NetworkRuntime:
         return {"outcome": str(b.outcome), "accepted_answer_id": b.accepted, "answers": answers}
 
     def _on_log(self, e: dict[str, Any]) -> None:
+        self._beat()
         kind = e["event"]
         with self._lock:
             ref = e.get("ref")

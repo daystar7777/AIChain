@@ -1,5 +1,6 @@
 [Unit]
 Description=AIChain daily experiment report (read-only)
+OnFailure=aichain-alert@%n.service
 
 [Service]
 Type=oneshot

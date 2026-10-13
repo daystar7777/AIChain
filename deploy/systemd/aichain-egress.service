@@ -4,6 +4,9 @@
 Description=AIChain egress proxy for the headless browser
 After=network-online.target
 Wants=network-online.target
+# Keep retrying (with growing delays) and alert on every failure (aichain-alert@).
+StartLimitIntervalSec=0
+OnFailure=aichain-alert@%n.service
 
 [Service]
 User=aichain-egress
@@ -13,6 +16,8 @@ RuntimeDirectoryMode=0750
 ExecStart=/opt/aichain/.venv/bin/python -m aichain.browser.egress --uds /run/aichain-egress/egress.sock --block 46.250.255.147
 Restart=on-failure
 RestartSec=3
+RestartSteps=6
+RestartMaxDelaySec=5min
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes

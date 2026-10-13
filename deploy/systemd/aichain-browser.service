@@ -5,6 +5,9 @@
 Description=AIChain headless browser (search/fetch)
 After=aichain-egress.service
 Requires=aichain-egress.service
+# Keep retrying (with growing delays) and alert on every failure (aichain-alert@).
+StartLimitIntervalSec=0
+OnFailure=aichain-alert@%n.service
 
 [Service]
 User=aichain-browser
@@ -24,6 +27,8 @@ Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/aichain-browser/ms-playwright
 ExecStart=/opt/aichain/.venv/bin/python -m aichain.browser.service --uds /run/aichain-browser/browser.sock --egress-uds /run/aichain-egress/egress.sock --no-chromium-sandbox --skip-ddg
 Restart=on-failure
 RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=5min
 PrivateNetwork=yes
 NoNewPrivileges=yes
 PrivateTmp=yes
