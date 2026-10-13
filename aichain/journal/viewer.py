@@ -51,7 +51,10 @@ def create_app(db_path: Path, poll_seconds: float = 0.5, keepalive_seconds: floa
             conn.close()
 
     def entries_sql(node: str | None, kind: str | None) -> tuple[str, list[Any]]:
-        sql = "SELECT id, ts, height, node, kind, episode, data FROM entries WHERE run_id = ? AND id > ?"
+        # The timeline never shows LLM prompts (the episode view does): leaving them out keeps
+        # these responses, and the viewer's memory, small.
+        sql = ("SELECT id, ts, height, node, kind, episode, CASE WHEN kind = 'llm_call' "
+               "THEN json_remove(data, '$.messages') ELSE data END AS data FROM entries WHERE run_id = ? AND id > ?")
         args: list[Any] = []
         if node:
             sql += " AND node IN (%s)" % ",".join("?" * len(node.split(",")))

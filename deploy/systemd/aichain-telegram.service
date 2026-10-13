@@ -16,6 +16,9 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/opt/aichain/data
+# Memory: a long-poll loop with an HTTP client (~50 MB).
+MemoryHigh=128M
+MemoryMax=256M
 
 [Install]
 WantedBy=multi-user.target

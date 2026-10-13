@@ -11,3 +11,7 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 ReadWritePaths=/opt/aichain/data/reports /opt/aichain/data/journal /opt/aichain/data/knowledge
+# Memory: the report aggregates in SQLite and streams rows, so it stays small however large the
+# journal grows (it used to load the whole journal for --all).
+MemoryHigh=384M
+MemoryMax=512M

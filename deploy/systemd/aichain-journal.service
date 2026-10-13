@@ -15,6 +15,10 @@ ProtectSystem=strict
 ProtectHome=yes
 # SQLite readers in WAL mode need write access to the -shm file next to the database.
 ReadWritePaths=/opt/aichain/data/journal /opt/aichain/data/knowledge
+# Memory: responses are paged (timeline batches of 1000 without LLM prompts); 512M leaves room
+# for a few open browsers. SQLite reads go through the page cache, outside this limit.
+MemoryHigh=384M
+MemoryMax=512M
 
 [Install]
 WantedBy=multi-user.target

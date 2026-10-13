@@ -33,6 +33,8 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 InaccessiblePaths=/opt/aichain/.env /opt/aichain/data
+# Memory: Chromium with a few tabs; reclaim from 1.5G, hard ceiling 2G (it restarts on the next request).
+MemoryHigh=1536M
 MemoryMax=2G
 TasksMax=512
 CPUQuota=200%

@@ -30,71 +30,78 @@ def _ro(path: Path) -> sqlite3.Connection:
     return conn
 
 
+PROBLEM_KINDS = ("tool_invalid", "policy_reject", "board_reject", "tool_error", "episode_error", "web_error",
+                 "runtime_error", "busy")
+
+
 def collect(journal: Path, knowledge: Path, since: float | None) -> dict[str, Any]:
+    """Aggregates for the report, computed by SQLite or streamed row by row: no table is loaded
+    into memory, and LLM prompts (the bulk of the journal) are never read into Python. With
+    `since`, only the period's rows are read (through the ts index the journal writer creates)."""
     j = _ro(journal)
     where, args = ("WHERE ts >= ?", (since,)) if since else ("", ())
-    entries = [dict(r) | {"data": json.loads(r["data"])}
-               for r in j.execute(f"SELECT ts, height, node, kind, episode, data FROM entries {where} ORDER BY id", args)]
-    metrics = [dict(r) | {"data": json.loads(r["data"])}
-               for r in j.execute(f"SELECT ts, height, data FROM metrics {where} ORDER BY ts", args)]
+    and_where = "AND ts >= ?" if since else ""
+    by_kind = Counter(dict(j.execute(f"SELECT kind, COUNT(*) FROM entries {where} GROUP BY kind", args)))
+    tok_in, tok_out, failed = j.execute(
+        "SELECT COALESCE(SUM(json_extract(data, '$.response.usage.input_tokens')), 0), "
+        "COALESCE(SUM(json_extract(data, '$.response.usage.output_tokens')), 0), "
+        "COALESCE(SUM(COALESCE(json_extract(data, '$.error'), '') != ''), 0) "
+        f"FROM entries WHERE kind = 'llm_call' {and_where}", args).fetchone()
+    episodes: dict[str, Counter] = defaultdict(Counter)
+    tools_used: dict[str, Counter] = defaultdict(Counter)
+    domains: Counter = Counter()
+    for node, kind, ev_kind, stopped, tool, url in j.execute(
+            "SELECT node, kind, json_extract(data, '$.kind'), json_extract(data, '$.stopped'), "
+            "json_extract(data, '$.tool'), json_extract(data, '$.url') FROM entries "
+            f"WHERE kind IN ('episode_end', 'tool', 'web_fetch') {and_where}", args):
+        if kind == "episode_end":
+            episodes[node][f"{ev_kind}/{stopped}"] += 1
+        elif kind == "tool":
+            tools_used[node][tool] += 1
+        else:
+            url = url or ""
+            domains[url.split("/")[2] if "//" in url else url] += 1
+    first = j.execute(f"SELECT ts, height FROM entries {where} ORDER BY id LIMIT 1", args).fetchone()
+    last = j.execute(f"SELECT ts, height FROM entries {where} ORDER BY id DESC LIMIT 1", args).fetchone()
+    m_first = j.execute(f"SELECT data FROM metrics {where} ORDER BY ts LIMIT 1", args).fetchone()
+    m_last = j.execute(f"SELECT data FROM metrics {where} ORDER BY ts DESC LIMIT 1", args).fetchone()
     runs = [dict(r) for r in j.execute("SELECT id, started_at, ended_at, label FROM runs ORDER BY id")]
     j.close()
-    k = _ro(knowledge) if knowledge.exists() else None
-    memories = [dict(r) for r in k.execute(
-        "SELECT node, seq, ts, height, kind, source, trust, content, topic, data, supersedes, hash FROM memories ORDER BY node, seq")] if k else []
-    if k:
+    notes: dict[str, list] = defaultdict(list)
+    persona: dict[str, list] = defaultdict(list)
+    web_facts: Counter = Counter()
+    if knowledge.exists():
+        k = _ro(knowledge)
+        cols = "node, seq, ts, height, kind, source, trust, content, topic, data, supersedes, hash"
+        # Current notes only (not superseded by a newer version); every persona edit.
+        for r in k.execute(f"SELECT {cols} FROM memories WHERE kind = 'note' AND hash NOT IN "
+                           "(SELECT supersedes FROM memories WHERE supersedes IS NOT NULL) ORDER BY node, seq"):
+            notes[r["node"]].append(dict(r) | {"data": json.loads(r["data"]) if r["data"] else {}})
+        for r in k.execute(f"SELECT {cols} FROM memories WHERE kind = 'persona' AND data IS NOT NULL "
+                           "AND data != '' ORDER BY node, seq"):
+            persona[r["node"]].append(dict(r) | {"data": json.loads(r["data"])})
+        web_facts.update(dict(k.execute(
+            "SELECT node, COUNT(*) FROM memories WHERE kind = 'fact' AND substr(source, 1, 4) = 'web:' "
+            "AND ts >= ? GROUP BY node", (since or 0,))))
         k.close()
-    return {"entries": entries, "metrics": metrics, "runs": runs, "memories": memories, "since": since}
+    return {
+        "by_kind": by_kind, "tokens": (tok_in, tok_out), "failed_calls": failed,
+        "episodes": episodes, "tools_used": tools_used, "domains": domains,
+        "period": (first["ts"], last["ts"]) if first else (None, None),
+        "heights": (first["height"], last["height"]) if first else (None, None),
+        "first": json.loads(m_first["data"]) if m_first else None,
+        "last": json.loads(m_last["data"]) if m_last else None,
+        "runs": runs, "notes": notes, "persona": persona, "web_facts": web_facts, "since": since,
+    }
 
 
 def analyse(d: dict[str, Any]) -> dict[str, Any]:
-    e = d["entries"]
-    by_kind = Counter(x["kind"] for x in e)
-    llm = [x for x in e if x["kind"] == "llm_call"]
-    tok_in = sum((x["data"].get("response") or {}).get("usage", {}).get("input_tokens", 0) for x in llm)
-    tok_out = sum((x["data"].get("response") or {}).get("usage", {}).get("output_tokens", 0) for x in llm)
-    failed_calls = sum(1 for x in llm if x["data"].get("error"))
-    episodes = defaultdict(Counter)
-    for x in e:
-        if x["kind"] == "episode_end":
-            episodes[x["node"]][f"{x['data'].get('kind')}/{x['data'].get('stopped')}"] += 1
-    tools_used = defaultdict(Counter)
-    for x in e:
-        if x["kind"] == "tool":
-            tools_used[x["node"]][x["data"].get("tool")] += 1
-    problems = Counter(x["kind"] for x in e if x["kind"] in (
-        "tool_invalid", "policy_reject", "board_reject", "tool_error", "episode_error", "web_error",
-        "runtime_error", "busy"))
-    first = d["metrics"][0]["data"] if d["metrics"] else None
-    last = d["metrics"][-1]["data"] if d["metrics"] else None
-    # Knowledge and persona from the persistent store (all time, filtered by period for changes).
-    mem = d["memories"]
-    since = d["since"] or 0
-    dead = {m["supersedes"] for m in mem if m["supersedes"]}
-    notes = defaultdict(list)
-    for m in mem:
-        if m["kind"] == "note" and m["hash"] not in dead:
-            notes[m["node"]].append(m | {"data": json.loads(m["data"]) if m["data"] else {}})
-    persona = defaultdict(list)
-    for m in mem:
-        if m["kind"] == "persona" and m["data"]:
-            persona[m["node"]].append(m | {"data": json.loads(m["data"])})
-    web_facts = Counter(m["node"] for m in mem if m["kind"] == "fact" and m["source"].startswith("web:")
-                        and m["ts"] >= since)
-    domains = Counter()
-    for x in e:
-        if x["kind"] == "web_fetch":
-            url = x["data"].get("url", "")
-            domains[url.split("/")[2] if "//" in url else url] += 1
+    tok_in, tok_out = d["tokens"]
     return {
-        "period": (e[0]["ts"], e[-1]["ts"]) if e else (None, None),
-        "heights": (e[0]["height"], e[-1]["height"]) if e else (None, None),
-        "by_kind": by_kind, "llm_calls": len(llm), "failed_calls": failed_calls,
-        "tokens": (tok_in, tok_out),
+        **d,
+        "llm_calls": d["by_kind"].get("llm_call", 0),
         "cost_usd": tok_in / 1e6 * PRICE_PER_M[0] + tok_out / 1e6 * PRICE_PER_M[1],
-        "episodes": episodes, "tools_used": tools_used, "problems": problems,
-        "first": first, "last": last, "notes": notes, "persona": persona, "web_facts": web_facts,
-        "domains": domains, "events": e,
+        "problems": Counter({k: v for k, v in d["by_kind"].items() if k in PROBLEM_KINDS}),
     }
 
 

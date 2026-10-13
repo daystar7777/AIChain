@@ -313,3 +313,59 @@ def test_viewer_finds_older_items_by_id(tmp_path):
     assert {"bounty_settled", "bounty_final"} <= {r["kind"] for r in rows}
     assert all(r["run_id"] == run and r["kind"] != "llm_call" for r in rows)
     assert client.get("/api/find", params={"ref": "x' OR 1=1 --"}).status_code == 422
+
+
+def test_report_aggregates_match_a_full_read_and_respect_the_period(tmp_path):
+    import time
+    from collections import Counter
+
+    from aichain import report
+
+    db = tmp_path / "j.db"
+    run_demo(db)
+    conn = sqlite3.connect(db)
+    old = time.time() - 3 * 86400  # half of the entries are from three days ago
+    conn.execute("UPDATE entries SET ts = ? WHERE id <= (SELECT MAX(id) / 2 FROM entries)", (old,))
+    conn.execute("UPDATE metrics SET ts = ? WHERE rowid = 1", (old,))
+    conn.commit()
+    j = Journal(db)  # an extra entry: a web fetch, recent
+    j.start_run("t")
+    j.record("web_fetch", {"url": "https://example.org/a"})
+    j.record("llm_call", {"error": "HTTP 500"})
+    j.close()
+
+    def reference(since):  # what the old report computed from every row in memory
+        rows = [(k, n, json.loads(d)) for k, n, d in conn.execute(
+            "SELECT kind, node, data FROM entries WHERE ts >= ? ORDER BY id", (since,))]
+        llm = [d for k, _, d in rows if k == "llm_call"]
+        return (Counter(k for k, _, _ in rows),
+                sum((d.get("response") or {}).get("usage", {}).get("input_tokens", 0) for d in llm),
+                sum((d.get("response") or {}).get("usage", {}).get("output_tokens", 0) for d in llm),
+                sum(1 for d in llm if d.get("error")),
+                Counter((n, d.get("tool")) for k, n, d in rows if k == "tool"))
+
+    for since in (None, time.time() - 86400):
+        a = report.analyse(report.collect(db, tmp_path / "none.db", since))
+        by_kind, tin, tout, failed, tools = reference(since or 0)
+        assert a["by_kind"] == by_kind and a["tokens"] == (tin, tout) and tin > 0
+        assert a["failed_calls"] == failed == 1 and a["llm_calls"] == by_kind["llm_call"]
+        assert Counter({(n, t): c for n, ts in a["tools_used"].items() for t, c in ts.items()}) == tools
+        assert a["domains"] == Counter({"example.org": 1})
+    day = report.collect(db, tmp_path / "none.db", time.time() - 86400)
+    assert sum(day["by_kind"].values()) < sum(report.collect(db, tmp_path / "none.db", None)["by_kind"].values())
+    assert day["first"]["height"] > 0 and day["period"][0] >= time.time() - 86400
+    # The day's rows are found through the index, not by reading the whole table.
+    plan = " ".join(r[3] for r in conn.execute(
+        "EXPLAIN QUERY PLAN SELECT kind, COUNT(*) FROM entries WHERE ts >= ? GROUP BY kind", (0,)))
+    assert "entries_ts" in plan
+
+
+def test_timeline_api_leaves_out_llm_prompts(tmp_path):
+    db = tmp_path / "j.db"
+    run, _ = run_demo(db)
+    client = TestClient(create_app(db))
+    calls = client.get(f"/api/runs/{run}/entries", params={"kind": "llm_call"}).json()
+    assert calls and all("messages" not in c["data"] and c["data"]["response"] for c in calls)
+    ep = calls[0]["episode"]
+    steps = client.get(f"/api/runs/{run}/episodes/{ep}").json()
+    assert next(s for s in steps if s["kind"] == "llm_call")["data"]["messages"]  # the episode view keeps them

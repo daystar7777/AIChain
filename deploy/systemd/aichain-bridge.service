@@ -13,6 +13,11 @@ WorkingDirectory=/opt/aichain
 ExecStart=/opt/aichain/.venv/bin/python -m aichain.bridge --provider opencode-go --research --research-minutes 180 --workshop --workshop-exec systemd --daily-calls-per-node 50 --daily-calls-total 200 --block-seconds 5 --host 127.0.0.1 --port 8780
 Restart=on-failure
 RestartSec=30
+# Memory (sized for a small VPS, 4 GB and up): the four nodes, the board and the content store
+# usually take a few hundred MB. Above MemoryHigh the kernel reclaims hard and slows the process;
+# MemoryMax is the hard ceiling (OOM kill -> restart -> alert) so a leak cannot take the host down.
+MemoryHigh=1G
+MemoryMax=1536M
 
 [Install]
 WantedBy=multi-user.target

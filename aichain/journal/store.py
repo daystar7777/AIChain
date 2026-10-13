@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS entries (
 );
 CREATE INDEX IF NOT EXISTS entries_run ON entries(run_id, id);
 CREATE INDEX IF NOT EXISTS entries_episode ON entries(run_id, episode);
+-- The daily report reads one day by time (built once, on the first start after an upgrade).
+CREATE INDEX IF NOT EXISTS entries_ts ON entries(ts);
 CREATE TABLE IF NOT EXISTS metrics (
     run_id INTEGER NOT NULL REFERENCES runs(id),
     ts REAL NOT NULL,
@@ -48,6 +50,7 @@ CREATE TABLE IF NOT EXISTS metrics (
     data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS metrics_run ON metrics(run_id, height);
+CREATE INDEX IF NOT EXISTS metrics_ts ON metrics(ts);
 CREATE TABLE IF NOT EXISTS snapshots (
     run_id INTEGER PRIMARY KEY REFERENCES runs(id),
     ts REAL NOT NULL,
