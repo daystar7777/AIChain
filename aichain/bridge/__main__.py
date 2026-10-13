@@ -146,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
             journal.attach(net)
         runtime = NetworkRuntime(net, block_seconds=args.block_seconds,
                                  state_path=ROOT / "data" / "bridge_state.json")
+        if journal:
+            runtime.tick_hooks.append(journal.tick)
         print(f"trace: {trace_path}", file=sys.stderr)
         print(f"chain replayed: {net.chain_stats}", file=sys.stderr)
         if journal:

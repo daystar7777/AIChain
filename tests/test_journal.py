@@ -208,3 +208,108 @@ def test_viewer_serves_reports(tmp_path):
     assert client.get("/reports/report-20261012-0010-24h.html").text == "<h1>r</h1>"
     for bad in ("../j.db", "x.html", "report-x.sh"):
         assert client.get(f"/reports/{bad}").status_code == 404
+
+
+def test_snapshot_lists_open_and_recent_items_only():
+    from aichain.journal.store import network_snapshot
+
+    net = build_network("scripted")
+    net.bridge_question("n1", "test", **DEFAULT_QUESTION)
+    net.run_until_idle()
+    snap = network_snapshot(net, recent=0)
+    assert [b["state"] for b in snap["bounties"]] == ["OPEN"]  # open ones always
+    assert snap["totals"]["bounties"] == 1 and "metrics" not in snap
+    p = SHORT_PARAMS
+    net.advance(p.commit_blocks + p.reveal_blocks + p.judge_blocks + p.dispute_blocks + 2)
+    snap = network_snapshot(net, recent=0)
+    assert snap["bounties"] == [] and snap["totals"]["bounties"] == 1  # closed: in the journal only
+    assert [b["state"] for b in network_snapshot(net, recent=1)["bounties"]] == ["FINAL"]
+
+
+def test_snapshot_is_written_by_the_writer_thread_at_most_every_interval(tmp_path):
+    import threading
+    import time
+
+    net = build_network("scripted")
+    journal = Journal(tmp_path / "j.db", snapshot_interval=3600)
+    journal.start_run("t")
+    writes, captures = [], []
+    real_write, real_capture = journal._write, journal._capture
+    journal._write = lambda *a: (writes.append(threading.current_thread().name), real_write(*a))
+    journal._capture = lambda force: (captures.append(force), real_capture(force))[1]
+    journal.attach(net)  # first snapshot inline
+    net.bridge_question("n1", "test", **DEFAULT_QUESTION)
+    net.run_until_idle()  # dozens of log entries within a fraction of the interval
+    assert captures == [True]
+    journal._last_snapshot -= 3600  # the interval has passed
+    net.advance(1)
+    journal.tick()
+    deadline = time.time() + 5
+    while len(writes) < 2 and time.time() < deadline:
+        time.sleep(0.01)
+    assert captures == [True, False] and writes[1] == "journal-writer"
+    journal._last_snapshot -= 3600
+    journal.tick()  # due, but nothing changed: no capture
+    assert len(captures) == 2
+    journal.close()
+    assert not any(t.name == "journal-writer" for t in threading.enumerate())
+    state = TestClient(create_app(tmp_path / "j.db")).get(f"/api/runs/{journal.run_id}/state").json()
+    assert state["height"] == net.board.height and state["bounties"][0]["state"] == "OPEN"
+
+
+def test_snapshot_writer_survives_a_full_disk(tmp_path, capsys):
+    import time
+
+    net = build_network("scripted")
+    journal = Journal(tmp_path / "j.db", snapshot_interval=0)
+    journal.start_run("t")
+    journal.attach(net)
+    real_write, calls = journal._write, []
+
+    def flaky(*a):
+        calls.append(1)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database or disk is full")
+        real_write(*a)
+
+    journal._write = flaky
+    for _ in range(2):
+        net.advance(1)
+        journal.tick()
+        deadline = time.time() + 5
+        while journal._pending is not None and time.time() < deadline:
+            time.sleep(0.01)
+    time.sleep(0.05)
+    journal.close()
+    assert journal.write_errors == 1 and len(calls) >= 2
+    assert "disk is full" in capsys.readouterr().err
+
+
+def test_prune_works_in_chunks_and_stops_at_young_entries(tmp_path):
+    import time
+
+    j = Journal(tmp_path / "j.db", keep_prompts_days=1)
+    j.PRUNE_CHUNK = 2
+    j.start_run("t")
+    for i in range(5):
+        j.record("llm_call", {"messages": [{"role": "user", "content": f"p{i}"}], "response": {"text": "ok"}})
+    j.record("tool", {"tool": "x"})
+    assert j.prune(now=time.time() + 2 * 86400) == 5
+    assert j.prune(now=time.time() + 2 * 86400) == 0  # resumes after the last pruned id
+    j.record("llm_call", {"messages": [{"role": "user", "content": "new"}]})
+    assert j.prune() == 0 and j._pruned_upto == 6  # the new entry is too young
+    rows = [json.loads(d) for (d,) in sqlite3.connect(tmp_path / "j.db").execute(
+        "SELECT data FROM entries WHERE kind = 'llm_call' ORDER BY id")]
+    assert all(r.get("messages_pruned") for r in rows[:5]) and rows[5]["messages"][0]["content"] == "new"
+
+
+def test_viewer_finds_older_items_by_id(tmp_path):
+    db = tmp_path / "j.db"
+    run, net = run_demo(db)
+    (bid,) = net.board.bounties
+    client = TestClient(create_app(db))
+    rows = client.get("/api/find", params={"ref": bid}).json()
+    assert rows and all(bid in json.dumps(r["data"], ensure_ascii=False) for r in rows)
+    assert {"bounty_settled", "bounty_final"} <= {r["kind"] for r in rows}
+    assert all(r["run_id"] == run and r["kind"] != "llm_call" for r in rows)
+    assert client.get("/api/find", params={"ref": "x' OR 1=1 --"}).status_code == 422

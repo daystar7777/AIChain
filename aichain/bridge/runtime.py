@@ -78,6 +78,8 @@ class NetworkRuntime:
         self.errors: list[str] = []
         self.state_path = state_path
         self._last_save = 0.0
+        # Called on the simulation thread every loop (e.g. the journal's snapshot timer).
+        self.tick_hooks: list[Any] = []
         self._load_state()
         net.listeners.append(self._on_log)
         self._refresh_snapshot()
@@ -162,6 +164,8 @@ class NetworkRuntime:
                     last_block = time.monotonic()
                     self.net.advance(1)
                 self._refresh_snapshot()
+                for hook in self.tick_hooks:
+                    hook()
                 if time.monotonic() - self._last_save >= SAVE_EVERY_SECONDS:
                     self.save_state()
                 failures = 0
