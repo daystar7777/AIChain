@@ -45,3 +45,27 @@ def test_board_storage_lease_bounds():
     b.open_account("s", 0)
     with pytest.raises(BoardError):
         b.create_offer("s", "storage", "t", "h", 1000, None, 720, quantity=20_000, period_blocks=720)
+
+
+def test_lease_and_subscription_survive_a_restart(tmp_path):
+    from aichain.chain.store import ChainStore
+
+    db = tmp_path / "chain.db"
+    net = build_network("scripted", chain=ChainStore(db))
+    seller, buyer = net.nodes["n2"], net.nodes["n1"]
+    seller._exec_tool("offer_create", json.dumps({"kind": "storage", "quantity": 200, "title": "200KB",
+                                                  "summary": "남는 공간", "price_P": 1, "period_hours": 1}))
+    offer = next(iter(net.board.offers.values()))
+    buyer._exec_tool("offer_buy", json.dumps({"offer_id": offer.offer_id}))
+    sub_offer = net.board.create_offer("n3", "subscription", "s", "terms", 1000, None, 2000, period_blocks=720)
+    sub = net.board.subscribe("n4", sub_offer.offer_id)
+    net.advance(100)
+
+    again = build_network("scripted", chain=ChainStore(db))
+    assert again.board.state_root() == net.board.state_root()
+    assert again.nodes["n1"].storage_quota_kb() == STORAGE_BASE_KB + 200
+    assert again.nodes["n2"].storage_quota_kb() == STORAGE_BASE_KB - 200
+    assert again.board.subscriptions[sub.sub_id].state == "ACTIVE"
+    again.advance(720)
+    assert again.nodes["n1"].storage_quota_kb() == STORAGE_BASE_KB
+    assert again.board.subscriptions[sub.sub_id].periods_refunded == 1  # nothing delivered
