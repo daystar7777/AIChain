@@ -1,9 +1,22 @@
-"""Runs the network in a background thread and tracks Bridge questions.
+"""Runs the network in background threads and tracks Bridge questions.
 
-The simulation thread is the only writer to the board. Episodes may block on LLM
-calls for a long time, so the HTTP side never touches the network directly: it puts
-questions into an inbox and reads the per-question records and the network snapshot
-this module maintains (each guarded by a short lock).
+Threading model. The Board is not thread-safe, so every access to the network holds
+`BoardLock`. Two threads take turns on it:
+- the block thread produces a block every `block_seconds` on a wall-clock schedule, with the
+  Core work that goes with it (Network.advance with inline episodes off: events, duties,
+  approvals), and runs operator actions and incoming questions. If it could not get the lock
+  in time (slow non-LLM work such as a web fetch held it), it produces the missed heights right
+  after, so heights keep tracking wall-clock time.
+- the episode thread runs the Mastermind episodes. It holds the lock while it builds prompts
+  and executes tools, and lets go of it while it waits on the LLM or web provider (the
+  gateways' call_guard), which is where nearly all of an episode's time goes. A provider
+  outage holding one call for minutes therefore no longer stops the block clock.
+The lock is FIFO, so neither thread starves the other, and after a block that leaves work for
+an idle episode thread the block thread hands the lock over before the next block: during a
+catch-up, events are still acted on between blocks. The HTTP side never touches the network
+directly: it puts questions into an inbox and operator actions into a call queue (both run on
+the block thread) and reads the per-question records and the snapshot this module maintains
+(guarded by a short lock of their own).
 """
 
 from __future__ import annotations
@@ -12,13 +25,14 @@ import json
 import os
 import queue
 import secrets
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from concurrent.futures import Future
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator
 
 from aichain.board import BountyState
 from aichain.common import fmt_P
@@ -27,6 +41,43 @@ from aichain.sim.network import Network
 TERMINAL = {"settled", "no_bounty", "failed"}
 KEEP_SECONDS = 30 * 86400  # question records older than this (and finished) are dropped
 SAVE_EVERY_SECONDS = 30.0
+MAX_CATCH_UP = 720  # missed blocks produced in one go before the snapshot and inbox are served again
+HAND_OVER_SECONDS = 1.0  # how long a block waits for an idle episode thread to pick up new work
+
+
+class BoardLock:
+    """FIFO (ticket) lock around all network access; not reentrant. Threads get it in the order
+    they asked, so a thread that releases and asks again goes behind the one already waiting."""
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition(threading.Lock())
+        self._next = 0
+        self._serving = 0
+        self._owner: int | None = None
+
+    def acquire(self) -> None:
+        with self._cv:
+            ticket = self._next
+            self._next += 1
+            while ticket != self._serving:
+                self._cv.wait()
+            self._owner = threading.get_ident()
+
+    def release(self) -> None:
+        with self._cv:
+            self._owner = None
+            self._serving += 1
+            self._cv.notify_all()
+
+    def held(self) -> bool:
+        return self._owner == threading.get_ident()
+
+    def __enter__(self) -> BoardLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.release()
 
 
 @dataclass
@@ -67,14 +118,19 @@ class NetworkRuntime:
         self.block_seconds = block_seconds
         self.bridge_node = bridge_node
         self._inbox: queue.Queue[QuestionRecord] = queue.Queue()
-        # Operator actions that must run on the simulation thread (it owns the board).
+        # Operator actions; they run on the block thread, holding the board lock.
         self._calls: queue.Queue[tuple[Any, Future]] = queue.Queue()
         self._lock = threading.Lock()
         self._questions: dict[str, QuestionRecord] = {}
         self._by_bounty: dict[str, str] = {}
         self._snapshot: dict[str, Any] = {}
         self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._threads: list[threading.Thread] = []
+        self._episode_thread: threading.Thread | None = None
+        self.board_lock = BoardLock()
+        self._wake = threading.Event()  # work for the episode thread
+        self._episodes_idle = threading.Event()  # the episode thread is waiting for work
+        self._episode_turn = threading.Event()  # it has taken the lock (or found nothing to do)
         self.errors: list[str] = []
         self.state_path = state_path
         self._last_save = 0.0
@@ -127,59 +183,134 @@ class NetworkRuntime:
     # ---- lifecycle ----
 
     def start(self) -> None:
-        if self._thread is None:
-            self._thread = threading.Thread(target=self._loop, name="aichain-sim", daemon=True)
-            self._thread.start()
+        if self._threads:
+            return
+        self.net.inline_episodes = False  # episodes run on their own thread
+        self.net.gateway.call_guard = self._provider_wait
+        if self.net.web is not None:
+            self.net.web.call_guard = self._provider_wait
+        self._episode_thread = threading.Thread(target=self._episode_loop, name="aichain-episodes",
+                                                daemon=True)
+        self._threads = [threading.Thread(target=self._block_loop, name="aichain-blocks", daemon=True),
+                         self._episode_thread]
+        for t in self._threads:
+            t.start()
 
     def stop(self, timeout: float = 10.0) -> None:
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout)
-            self._thread = None
+        self._wake.set()
+        for t in self._threads:
+            t.join(timeout)
+        self._threads = []
+        self.net.gateway.call_guard = None
+        if self.net.web is not None:
+            self.net.web.call_guard = None
+        self.net.inline_episodes = True
         self.save_state()
 
-    def _loop(self) -> None:
-        last_block = time.monotonic()
+    @contextmanager
+    def _provider_wait(self) -> Iterator[None]:
+        """Gateways' call_guard: the episode thread lets go of the board while it waits on a
+        provider, so blocks keep coming. Blocks made meanwhile are not part of its episode.
+        Anything else (an admin action on the block thread) keeps the lock: a block is atomic."""
+        if threading.current_thread() is not self._episode_thread or not self.board_lock.held():
+            yield
+            return
+        episode, self.net.current_episode = self.net.current_episode, None
+        self.board_lock.release()
+        try:
+            yield
+        finally:
+            self.board_lock.acquire()
+            self.net.current_episode = episode
+
+    def _block_loop(self) -> None:
+        next_block = time.monotonic() + self.block_seconds
         failures = 0
         halt_reported = False
         while not self._stop.is_set():
             if self.net.halted:
                 # Fail closed: stop producing blocks and running episodes; the API keeps answering.
-                if not halt_reported:
-                    halt_reported = True
-                    try:
-                        self.net.manager_send("core", f"⛔ 체인이 멈췄어요: {self.net.halted}")
-                    except Exception:
-                        pass
-                self._refresh_snapshot()
+                with self.board_lock:
+                    if not halt_reported:
+                        halt_reported = True
+                        try:
+                            self.net.manager_send("core", f"⛔ 체인이 멈췄어요: {self.net.halted}")
+                        except Exception:
+                            pass
+                    self._refresh_snapshot()
                 self._stop.wait(1.0)
                 continue
             try:
-                self._drain_calls()
-                self._drain_inbox()
-                self.net.run_until_idle()
-                if time.monotonic() - last_block >= self.block_seconds:
-                    last_block = time.monotonic()
-                    self.net.advance(1)
-                self._refresh_snapshot()
-                if time.monotonic() - self._last_save >= SAVE_EVERY_SECONDS:
-                    self.save_state()
+                with self.board_lock:
+                    self._drain_calls()
+                    self._drain_inbox()
+                self._hand_over()
+                produced = 0  # every block that is due, also the ones missed while the lock was busy
+                while time.monotonic() >= next_block and produced < MAX_CATCH_UP and not self._stop.is_set():
+                    with self.board_lock:
+                        if self.net.halted:
+                            break
+                        self.net.advance(1)
+                    next_block += self.block_seconds
+                    produced += 1
+                    self._hand_over()
+                with self.board_lock:
+                    if produced > 1:
+                        self.net.log("runtime", "blocks_caught_up", blocks=produced)
+                    self._refresh_snapshot()
+                    if time.monotonic() - self._last_save >= SAVE_EVERY_SECONDS:
+                        self.save_state()
                 failures = 0
             except Exception as e:  # keep the network alive; surface the error, back off if it repeats
                 failures += 1
-                self.errors.append(repr(e))
-                self.errors[:] = self.errors[-100:]
-                try:
-                    self.net.log("runtime", "runtime_error", error=repr(e)[:500], repeated=failures)
-                except Exception:
-                    pass
+                self._error(e, failures)
                 self._stop.wait(min(60.0, 0.5 * 2 ** min(failures, 7)))
                 continue
-            self._stop.wait(min(0.05, self.block_seconds))
+            self._stop.wait(max(0.0, min(0.05, next_block - time.monotonic())))
+
+    def _hand_over(self) -> None:
+        """After a block (or new questions) left work for an idle episode thread: wake it and let it
+        take the lock before the next block, so the event is acted on in time even mid catch-up."""
+        if not self._episodes_idle.is_set() or not any(n.has_pending for n in self.net.nodes.values()):
+            return  # a running episode thread takes turns through the FIFO lock anyway
+        self._episode_turn.clear()
+        self._wake.set()
+        self._episode_turn.wait(HAND_OVER_SECONDS)
+
+    def _episode_loop(self) -> None:
+        failures = 0
+        while not self._stop.is_set():
+            self._episodes_idle.set()
+            self._wake.wait(0.05)
+            self._wake.clear()
+            self._episodes_idle.clear()
+            if self._stop.is_set() or self.net.halted:
+                self._episode_turn.set()
+                self._stop.wait(0.5 if self.net.halted else 0)
+                continue
+            try:
+                with self.board_lock:
+                    self._episode_turn.set()
+                    self.net.run_until_idle()
+                failures = 0
+            except Exception as e:
+                failures += 1
+                self._error(e, failures)
+                self._stop.wait(min(60.0, 0.5 * 2 ** min(failures, 7)))
+
+    def _error(self, e: Exception, failures: int) -> None:
+        self.errors.append(repr(e))
+        self.errors[:] = self.errors[-100:]
+        try:
+            with self.board_lock:
+                self.net.log("runtime", "runtime_error", error=repr(e)[:500], repeated=failures)
+        except Exception:
+            pass
 
     def call(self, fn: Any, timeout: float = 30.0) -> Any:
-        """Run fn(net) on the simulation thread and return its result (for admin actions)."""
-        if self._thread is None:  # not started (tests): run inline
+        """Run fn(net) on the block thread and return its result (for admin actions)."""
+        if not self._threads:  # not started (tests): run inline
             return fn(self.net)
         fut: Future = Future()
         self._calls.put((fn, fut))

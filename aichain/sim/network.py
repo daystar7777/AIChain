@@ -47,6 +47,9 @@ class Network:
         self.reflect_interval_blocks: int | None = None
         # Periodic economy check per node (staggered); None disables.
         self.economy_interval_blocks: int | None = None
+        # advance() runs queued episodes after every block. The Bridge runtime turns this off and
+        # runs episodes on their own thread, so blocks keep coming while a model call is pending.
+        self.inline_episodes = True
         self.board = Board(params)
         self.content = ContentStore()
         self.chain_stats: dict[str, int] | None = None
@@ -459,7 +462,8 @@ class Network:
             for node in self.nodes.values():
                 node.run_duties()
             self.run_approvals()
-            self.run_until_idle()
+            if self.inline_episodes:
+                self.run_until_idle()
 
     def balances(self) -> dict[str, dict[str, int]]:
         return {nid: {"balance_mP": a.balance_mP, "locked_mP": a.locked_mP}

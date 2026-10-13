@@ -208,7 +208,8 @@ class Node:
 
     @property
     def has_pending(self) -> bool:
-        return bool(self._queue)
+        """Events waiting, or one in progress (blocks may be produced while it waits on the model)."""
+        return bool(self._queue) or self.current_event is not None
 
     def run_pending(self) -> list[EpisodeResult]:
         results = []
@@ -1374,11 +1375,13 @@ class Node:
                 f"거부되면 집행하지 않는다.")
 
     def execute_approval(self, raw_args: str, tool: str) -> str:
-        self._executing_approval = True
+        # Runs on a block, possibly while an episode of this node waits on the model: it must not
+        # act in that episode's context (e.g. link a bounty to its Bridge question).
+        self._executing_approval, event, self.current_event = True, self.current_event, None
         try:
             return self._exec_tool(tool, raw_args)
         finally:
-            self._executing_approval = False
+            self._executing_approval, self.current_event = False, event
 
     def _llm_quota_text(self) -> str:
         gw = self.net.gateway

@@ -163,10 +163,11 @@ def test_runtime_backs_off_and_recovers_from_errors():
     net.run_until_idle = sometimes_broken
     runtime.start()
     deadline = time.time() + 10
-    while time.time() < deadline and net.board.height < 3:
+    while time.time() < deadline and (net.board.height < 3 or state["n"] < 3):
         time.sleep(0.05)
     runtime.stop()
-    assert len(runtime.errors) == 2 and net.board.height >= 3
+    # The episode thread backed off twice and recovered; blocks kept coming meanwhile.
+    assert len(runtime.errors) == 2 and net.board.height >= 3 and state["n"] >= 3
 
 
 # ---- provider responses ----

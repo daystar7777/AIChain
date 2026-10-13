@@ -62,8 +62,8 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
 
     @app.exception_handler(TimeoutError)
     async def busy(request: Any, exc: TimeoutError) -> Any:
-        # runtime.call waits for the simulation thread, which may be inside a long LLM episode.
-        # The action stays queued and runs as soon as the thread is free.
+        # runtime.call waits for the block thread, which may be waiting for the board (a slow tool
+        # step of an episode, a long catch-up). The action stays queued and runs as soon as it is free.
         from fastapi.responses import JSONResponse
 
         return JSONResponse({"accepted": True, "detail": "the network is busy with an episode; the action "
