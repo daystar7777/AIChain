@@ -163,6 +163,7 @@ const KIND = {
   purchase_delivered: ["정보 거래", "ok"], subscription_delivered: ["구독 전달", "ok"], subscription_period: ["구독 정산", ""], purchase_refunded: ["구매 환불", "warn"],
   proposal_created: ["제안", "warn"], voted: ["투표", ""], proposal_vetoed: ["거부권", "bad"],
   proposal_tallied: ["개표", "warn"], proposal_approved: ["제안 적용", "ok"], epoch_issued: ["발행", "ok"],
+  peer_msg: ["노드 메시지", ""], policy_paused: ["마스터마인드 정지", "bad"], policy_unpaused: ["정지 해제", "ok"],
 };
 const GROUPS = {
   core: k => k !== "llm_call" && k !== "llm_text",
@@ -173,7 +174,8 @@ const GROUPS = {
   money: k => k === "balance",
   memory: k => k === "memory" || k === "knowledge",
   web: k => ["web_search", "web_fetch", "web_error", "knowledge"].includes(k),
-  problem: k => ["tool_invalid", "policy_reject", "board_reject", "runtime_error", "skip_event", "web_error"].includes(k),
+  problem: k => ["tool_invalid", "policy_reject", "board_reject", "runtime_error", "skip_event", "web_error",
+                  "policy_paused"].includes(k),
 };
 const PERSONA = { seeker: "Seeker · 질문자", artisan: "Artisan · 전문가", warden: "Warden · 감시자", nomad: "Nomad · 범용" };
 const STAGES = ["OPEN", "REVEAL", "JUDGING", "SETTLED", "FINAL"];
@@ -246,6 +248,9 @@ function describe(e) {
     case "chain_replayed": return `거래 ${d.transactions} · 블록 ${d.blocks} · 높이 ${d.height}`;
     case "episode_error": case "tool_error": case "memory_error": return esc(short(d.error, 200));
     case "knowledge": return `<b>${esc(d.topic)}</b> v${d.version} · 사실 ${d.facts}개 · 확신 ${d.confidence}`;
+    case "peer_msg": return `→ ${esc(d.to)}${d.queued ? "" : " (처리 안 됨)"}: ${esc(short(d.text, 200))}`;
+    case "policy_paused": return esc(short(d.reason, 200));
+    case "policy_unpaused": return `${esc(d.target)} — ${esc(short(d.note, 120))} (사유였던 것: ${esc(short(d.reason, 100))})`;
     default: return esc(short(JSON.stringify(d), 200));
   }
 }
