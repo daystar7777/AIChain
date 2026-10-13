@@ -1,0 +1,24 @@
+# Asks one experiment test question through the Bridge API (aichain.feeder), as an outside client
+# would. Set up once, then enable the timer:
+#   .venv/bin/python -m aichain.feeder setup && systemctl restart aichain-bridge
+#   systemctl enable --now aichain-feeder.timer
+[Unit]
+Description=AIChain test question (Bridge client "feeder")
+After=aichain-bridge.service
+OnFailure=aichain-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/aichain
+ExecStart=/opt/aichain/.venv/bin/python -m aichain.feeder post
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/aichain/data
+# It only talks to the Bridge on loopback.
+IPAddressAllow=localhost
+IPAddressDeny=any
+# Memory: one HTTP request.
+MemoryHigh=96M
+MemoryMax=128M

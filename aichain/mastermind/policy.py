@@ -27,6 +27,9 @@ class PolicyLimits:
     writes_per_episode: int = 4
     disputes_per_day: int = 5
     messages_per_hour: int = 3  # send_msg: free, so capped to keep nodes from flooding each other
+    # Bounties a node posts from its own research (questions it could not settle): small and few.
+    research_asks_per_day: int = 2
+    research_ask_max_mP: int = 5_000
     pause_after_violations: int = 10
     # Anomaly (04 doc 3.4, 07 doc 5): outflows within a rolling hour above 50% of the available
     # balance at the window start pause the Mastermind. Below the floor (dust) it never triggers.
@@ -42,6 +45,7 @@ class PolicyGuard:
     disputes: list[int] = field(default_factory=list)  # heights
     ratings: list[tuple[int, str]] = field(default_factory=list)  # (height, subject)
     messages: list[int] = field(default_factory=list)  # heights of sent peer messages
+    research_asks: list[int] = field(default_factory=list)  # heights of bounties posted while researching
     writes_this_episode: int = 0
     consecutive_violations: int = 0
     paused: bool = False
@@ -122,6 +126,12 @@ class PolicyGuard:
         if sum(1 for x in self.messages if x > height - BLOCKS_PER_HOUR) >= self.limits.messages_per_hour:
             self._violate(f"message limit {self.limits.messages_per_hour}/hour reached")
 
+    def check_research_ask(self, reward_mP: int, height: int) -> None:
+        if reward_mP > self.limits.research_ask_max_mP:
+            self._violate(f"a research question may offer at most {self.limits.research_ask_max_mP // 1000}P")
+        if sum(1 for x in self.research_asks if x > height - BLOCKS_PER_DAY) >= self.limits.research_asks_per_day:
+            self._violate(f"research question limit {self.limits.research_asks_per_day}/day reached")
+
     def check_rating(self, subject: str, height: int) -> None:
         if any(s == subject and h > height - BLOCKS_PER_DAY for h, s in self.ratings):
             self._violate(f"already rated {subject} today (1 per subject per day)")
@@ -158,7 +168,7 @@ class PolicyGuard:
 
     def dump(self) -> dict:
         return {"spends": self.spends[-500:], "disputes": self.disputes[-100:], "ratings": self.ratings[-200:],
-                "messages": self.messages[-50:],
+                "messages": self.messages[-50:], "research_asks": self.research_asks[-20:],
                 "consecutive_violations": self.consecutive_violations, "paused": self.paused,
                 "pause_reason": self.pause_reason, "balance_marks": self.balance_marks[-200:]}
 
@@ -167,6 +177,7 @@ class PolicyGuard:
         self.disputes = list(d.get("disputes", []))
         self.ratings = [tuple(x) for x in d.get("ratings", [])]
         self.messages = list(d.get("messages", []))
+        self.research_asks = list(d.get("research_asks", []))
         self.consecutive_violations = int(d.get("consecutive_violations", 0))
         self.paused = bool(d.get("paused", False))
         self.pause_reason = d.get("pause_reason")

@@ -387,3 +387,34 @@ def test_brave_key_is_redacted():
     key = "BSA" + "Ab3" * 10
     assert key not in str(redact({"note": f"key {key}", "env": f"BRAVE_SEARCH_API_KEY={key}"}))
     assert redact({"x": f"BRAVE_ANSWER_API_KEY=abc123"})["x"].endswith(REDACTED)
+
+
+def test_research_may_post_small_questions_a_few_times_a_day(tmp_path):
+    asked = []
+
+    def curious(request):
+        user = next(m.content for m in reversed(request.messages) if m.role == "user")
+        if 'type="research_tick"' not in user:
+            return research_brain(request)
+        if request.messages[-1].role == "tool":
+            asked.append(request.messages[-1].content)
+            return tool_response(("done", {"summary": "질문 올림"}))
+        assert "ask" in {t.name for t in request.tools} and "1~5P" in user
+        reward = 9 if len(asked) == 0 else 3
+        return tool_response(("ask", {"question": {"title": "PEP 750 채택 시점", "body": "언제 채택됐나?",
+                                                    "acceptance_criteria": "공식 PEP 페이지 링크와 날짜"},
+                                       "reward_P": reward, "tags": ["python"]}))
+
+    net, _, _ = research_net(tmp_path, brain=curious)
+    for _ in range(4):
+        net.research(["n2"])
+        net.run_until_idle()
+    assert "at most 5P" in asked[0]
+    assert sum("bounty_id=" in a for a in asked) == 2 and "2/day" in asked[3]
+    mine = [b for b in net.board.bounties.values() if b.asker == "n2"]
+    assert len(mine) == 2 and all(b.reward_mP == 3000 for b in mine)
+    assert net.nodes["n2"].policy.dump()["research_asks"]
+    net.advance(17_281)
+    net.research(["n2"])
+    net.run_until_idle()
+    assert "bounty_id=" in asked[-1]  # a new day

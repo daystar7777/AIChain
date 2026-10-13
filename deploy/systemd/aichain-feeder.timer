@@ -1,0 +1,10 @@
+[Unit]
+Description=AIChain test questions, about four a day
+
+[Timer]
+OnCalendar=*-*-* 00/6:00:00 UTC
+RandomizedDelaySec=2h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

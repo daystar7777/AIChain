@@ -1,0 +1,197 @@
+{
+ "note": "aichain.feeder가 Bridge로 묻는 실험용 질문. id는 바꾸지 않는다(이미 물은 질문 기록에 쓰임).",
+ "questions": [
+  {
+   "id": "ai-01",
+   "title": "AI 에이전트 프레임워크 비교",
+   "body": "지금 많이 쓰이는 오픈소스 LLM 에이전트 프레임워크 3개를 골라 도구 호출 방식과 멀티 에이전트 지원 여부를 비교해 주세요.",
+   "acceptance_criteria": "프레임워크 3개 각각 공식 문서나 저장소 링크, 도구 호출 방식 한 줄, 멀티 에이전트 지원 여부",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "ai-02",
+   "title": "MCP(Model Context Protocol)란",
+   "body": "Model Context Protocol이 무엇이고 어떤 문제를 푸는지, 서버와 클라이언트가 주고받는 것이 무엇인지 설명해 주세요.",
+   "acceptance_criteria": "공식 사양이나 문서 링크 1개 이상, 서버·클라이언트 역할 설명, 대표 사용 예 1개",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "ai-03",
+   "title": "최근 공개된 오픈 웨이트 LLM",
+   "body": "최근 6개월 안에 공개된 오픈 웨이트 LLM 중 두 개를 골라 파라미터 수, 라이선스, 대표 벤치마크 점수를 정리해 주세요.",
+   "acceptance_criteria": "모델 2개, 각각 공개일·파라미터 수·라이선스·벤치마크 1개와 출처 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "ai-04",
+   "title": "LLM API 가격 비교",
+   "body": "주요 LLM API 3곳의 대표 모델 입력·출력 100만 토큰당 가격을 비교해 주세요.",
+   "acceptance_criteria": "3곳 각각 모델명, 입력·출력 가격, 공식 가격 페이지 링크, 확인 날짜",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "ai-05",
+   "title": "프롬프트 캐싱의 효과",
+   "body": "LLM API의 프롬프트 캐싱이 비용과 지연 시간을 얼마나 줄이는지, 어떤 조건에서 효과가 있는지 정리해 주세요.",
+   "acceptance_criteria": "캐싱을 제공하는 API 1곳 이상의 공식 문서 링크, 할인율이나 수치, 적용 조건",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "ai-06",
+   "title": "LLM 평가 벤치마크의 오염 문제",
+   "body": "벤치마크 데이터 오염(contamination)이 무엇이고 이를 줄이기 위한 방법 두 가지를 설명해 주세요.",
+   "acceptance_criteria": "정의, 방법 2개, 논문이나 기술 글 링크 1개 이상",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "py-01",
+   "title": "Python 3.14의 주요 변화",
+   "body": "Python 3.14에서 바뀐 점 중 실무에 영향이 큰 것 세 가지를 골라 설명해 주세요.",
+   "acceptance_criteria": "변화 3개, 각각 관련 PEP 번호나 공식 What's New 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "py-02",
+   "title": "free-threaded Python 현황",
+   "body": "GIL 없는(free-threaded) CPython 빌드의 현재 상태와 성능상의 장단점을 정리해 주세요.",
+   "acceptance_criteria": "관련 PEP 링크, 지원 상태(실험적/정식), 장점 1개와 단점 1개",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "py-03",
+   "title": "uv와 pip 비교",
+   "body": "Python 패키지 관리자 uv가 pip과 비교해 무엇이 다른지 세 가지로 정리해 주세요.",
+   "acceptance_criteria": "차이점 3개, uv 공식 문서 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "py-04",
+   "title": "Python 타입 검사기 비교",
+   "body": "mypy, pyright 등 Python 타입 검사기 두 개를 속도와 엄격성 면에서 비교해 주세요.",
+   "acceptance_criteria": "도구 2개, 각각 특징과 공식 저장소나 문서 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "se-01",
+   "title": "플레이키 테스트 다루기",
+   "body": "자주 실패했다 성공했다 하는 테스트(flaky test)를 찾고 줄이는 실무 방법 세 가지를 알려 주세요.",
+   "acceptance_criteria": "방법 3개, 사례나 도구를 다룬 링크 1개 이상",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "se-02",
+   "title": "속성 기반 테스트",
+   "body": "속성 기반 테스트(property-based testing)가 예제 기반 테스트와 어떻게 다른지 Python 예시와 함께 설명해 주세요.",
+   "acceptance_criteria": "차이 설명, 짧은 코드 예시, Hypothesis 등 도구 문서 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "sec-01",
+   "title": "프롬프트 인젝션 방어",
+   "body": "LLM 에이전트가 웹 페이지를 읽을 때 생기는 간접 프롬프트 인젝션을 줄이는 방법 세 가지를 정리해 주세요.",
+   "acceptance_criteria": "방법 3개, OWASP 등 공신력 있는 자료 링크 1개 이상",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "sec-02",
+   "title": "소프트웨어 공급망 공격 사례",
+   "body": "최근 1년 안에 알려진 오픈소스 패키지 공급망 공격 사례 하나를 요약하고 어떻게 막을 수 있었는지 설명해 주세요.",
+   "acceptance_criteria": "사례 이름과 날짜, 피해 범위, 예방책 1개 이상, 보도나 보안 공지 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "sec-03",
+   "title": "SBOM이란",
+   "body": "SBOM(소프트웨어 자재 명세서)이 무엇이고 어떤 표준 형식이 있는지 정리해 주세요.",
+   "acceptance_criteria": "정의, 형식 2개 이름, 공식 사양 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "fraud-01",
+   "title": "온라인 리뷰 조작 탐지",
+   "body": "가짜 리뷰나 리뷰 조작을 탐지하는 데 쓰이는 신호 세 가지를 설명해 주세요.",
+   "acceptance_criteria": "신호 3개, 연구나 플랫폼 공식 자료 링크 1개 이상",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "fraud-02",
+   "title": "담합 거래 탐지 기법",
+   "body": "마켓에서 계정들이 서로 사고팔아 실적을 부풀리는 담합(wash trading)을 탐지하는 방법 두 가지를 정리해 주세요.",
+   "acceptance_criteria": "방법 2개, 실제 적용 사례나 논문 링크 1개 이상",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "sci-01",
+   "title": "최근 우주 탐사 소식",
+   "body": "최근 3개월 안에 있었던 우주 탐사 관련 주요 소식 하나를 요약해 주세요.",
+   "acceptance_criteria": "무엇이 언제 일어났는지, 의미 한 줄, 기관 발표나 보도 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "sci-02",
+   "title": "단백질 구조 예측의 현재",
+   "body": "AlphaFold 이후 단백질 구조 예측 분야에서 달라진 점 두 가지를 정리해 주세요.",
+   "acceptance_criteria": "변화 2개, 논문이나 기관 발표 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "sci-03",
+   "title": "상온 초전도 주장 검증",
+   "body": "최근 몇 년 사이 상온 초전도체라는 주장이 나왔다가 검증된 사례 하나를 요약해 주세요.",
+   "acceptance_criteria": "주장 내용, 검증 결과, 학술지나 보도 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "econ-01",
+   "title": "최근 미국 기준금리",
+   "body": "미국 연준의 최근 기준금리 결정 내용과 날짜를 알려 주세요.",
+   "acceptance_criteria": "결정 날짜, 금리 범위, 연준 공식 발표 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "econ-02",
+   "title": "반도체 산업 흐름",
+   "body": "AI 수요가 메모리 반도체(HBM 등) 시장에 준 영향을 최근 자료로 정리해 주세요.",
+   "acceptance_criteria": "핵심 변화 2개, 수치 1개 이상, 기업 발표나 보도 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "econ-03",
+   "title": "한국 소비자물가",
+   "body": "한국의 가장 최근 소비자물가 상승률(전년 동월 대비)과 발표 기관을 알려 주세요.",
+   "acceptance_criteria": "기준 월, 상승률, 통계청 등 공식 출처 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  },
+  {
+   "id": "econ-04",
+   "title": "스테이블코인 규제 동향",
+   "body": "주요 국가 한 곳의 스테이블코인 규제 현황을 요약해 주세요.",
+   "acceptance_criteria": "국가, 법이나 규정 이름, 핵심 요건 2개, 공식 자료나 보도 링크",
+   "max_reward_P": 5,
+   "deadline_minutes": 90
+  }
+ ]
+}
