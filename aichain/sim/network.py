@@ -217,6 +217,13 @@ class Network:
                     and self.gateway.has_daily_room(node.id):
                 node.enqueue("tool_request_new", {"request_id": request_id})
 
+    def announce_tool(self, tool_id: str, version: int) -> None:
+        """Published code is public (05 doc 4.1, 4.3): reviewers (Warden) get to read each new tool."""
+        listing = self.board.tools[(tool_id, version)]
+        for node in self.nodes.values():
+            if node.cfg.watch_settlements and node.id != listing.author and self.gateway.has_daily_room(node.id):
+                node.enqueue("tool_published", {"tool_id": tool_id, "version": version})
+
     def verify_tool_submission(self, request_id: str, tool_id: str, version: int) -> Any:
         """Core runs the buyer's acceptance tests on the submitted version in the isolated
         executor; root records the result on chain (objective, no LLM judgement)."""

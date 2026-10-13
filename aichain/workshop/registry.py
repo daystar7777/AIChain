@@ -25,6 +25,9 @@ from aichain.workshop.executor import (
 from aichain.workshop.manifest import ToolTest, ToolManifest
 
 MIN_TESTS = 3
+# Reading a published version (tool_source): capped so one read fits in an episode's context.
+SOURCE_MAX_CODE_CHARS = 16_000
+SOURCE_MAX_META_CHARS = 6_000
 
 
 class WorkshopError(Exception):
@@ -219,6 +222,27 @@ class Workshop:
         if st.owner != owner:
             raise WorkshopError(f"{tool_id} belongs to {st.owner}")
         return st
+
+    def published_source(self, tool_id: str, version: int, chain_code_hash: str) -> str:
+        """Manifest, tests and code of a version for any node to review (05 doc 4.1: published
+        code is public; 4.3: Warden reads it). The caller checks the version is listed on chain;
+        the stored code is re-hashed against the listing and a mismatch is shown, not hidden."""
+        st = self.tools.get(tool_id)
+        tv = st.versions.get(version) if st is not None else None
+        if tv is None:
+            raise WorkshopError(f"{tool_id} v{version}: code is not in the workshop")
+        actual = sha256_hex(canonical_json({"code": tv.code, "manifest": tv.manifest}))
+        meta = (json.dumps(tv.manifest, ensure_ascii=False, indent=1) + "\n## tests (first 5 of "
+                f"{len(tv.tests)}, status {tv.test_status})\n" + json.dumps(tv.tests[:5], ensure_ascii=False))
+        if len(meta) > SOURCE_MAX_META_CHARS:
+            meta = meta[:SOURCE_MAX_META_CHARS] + "\n... (cut)"
+        code = tv.code
+        if len(code) > SOURCE_MAX_CODE_CHARS:
+            code = code[:SOURCE_MAX_CODE_CHARS] + f"\n# ... (cut: {len(tv.code)} chars in total)"
+        return (f"tool_id: {tool_id}\nversion: {version}\nauthor: {st.owner}\n"
+                f"code_hash: {actual} ({'matches' if actual == chain_code_hash else 'DOES NOT MATCH'} "
+                f"the on-chain listing {chain_code_hash})\n## manifest\n{meta}\n"
+                f"## code ({len(tv.code)} chars)\n{code}")
 
     def describe(self, owner: str, tool_id: str | None = None, version: int | None = None) -> str:
         if tool_id is None:

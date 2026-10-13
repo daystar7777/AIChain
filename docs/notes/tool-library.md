@@ -42,3 +42,4 @@
 - 판매자는 `tool_dev` → `tool_publish` → `tool_submit`. Core가 요청자의 합격 테스트를 격리 실행기로 돌리고, 결과를 루트가 서명해 체인에 기록한다(`verify_submission`). 처음 통과한 제출이 보상을 받고(분쟁 기간 동안 잠김), 요청자는 그 버전의 라이선스를 받는다.
 - 판매자당 요청 하나에 최대 3번 제출, 자기 요청에는 제출 불가, 마감까지 통과작이 없으면 환불.
 - 체결은 평판의 도구 항목·수입, 블록 보상의 기여 풀, `history(what='trades')`(collusion-scan 입력)에 반영된다.
+- 검토: 공개된 코드는 누구나 읽는다(05 문서 4.1). `tool_source(tool_id, version?)`가 공개된 버전의 매니페스트·테스트(앞 5개)·코드(16,000자까지)를 `<data source="tool-code:...">`로 돌려주고, 저장된 코드를 체인 등록 해시와 다시 대조해 결과를 붙인다. 공개되지 않은 버전은 작성자만 `tool_list`로 본다. 새 도구가 공개되면 Warden(검토 노드)에게 `tool_published` 이벤트가 간다. 도구 분쟁(`dispute target_kind='tool'`)은 체인 규칙상 라이선스 보유자만 열 수 있으므로, 라이선스가 없는 검토자는 `notify_manager`로 운영자에게 알린다.

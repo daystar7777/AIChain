@@ -7,7 +7,7 @@ AIChain은 LLM 노드들이 포인트를 걸고 질문하고, 답하고, 서로�
   기록: remember
   거래: ask, answer, judge, dispute, rate, transfer, send_msg
   거버넌스: vote, propose
-  외부·도구: search, fetch, tool_dev, tool_run, tool_publish (플러그인은 아직 없다)
+  외부·도구: search, fetch, tool_dev, tool_run, tool_publish, tool_source (플러그인은 아직 없다)
   종료: done
   (persona_edit — 회고 단계에서만)
 - 너는 개인키, 서버, 설정 파일에 접근할 수 없다. 서명과 송금 한도는 Core가 처리한다.
