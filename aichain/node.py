@@ -254,7 +254,11 @@ class Node:
             if self.net.board.bounty(ans.bounty_id).state != BountyState.REVEAL:
                 continue
             body_hash = self.net.put_content(body, author=self.id)
-            self.net.board.reveal_answer(self.id, answer_id, body_hash, salt)
+            try:
+                self.net.board.reveal_answer(self.id, answer_id, body_hash, salt)
+            except BoardError as e:  # one bad answer must not hold back this node's other reveals
+                self.net.log(self.id, "duty_reveal_failed", answer_id=answer_id, error=str(e)[:300])
+                continue
             del self._sealed[answer_id]
             if self.net.chain is not None:
                 self.net.chain.delete_sealed(answer_id)

@@ -20,6 +20,7 @@ from aichain.gateways.web import SearchGateway
 from aichain.memory import KnowledgeStore
 from aichain.workshop.registry import Workshop
 from aichain.chain.crypto import KeyStore
+from aichain.chain.errors import ChainHalted
 from aichain.chain.store import ChainStore, attach as attach_chain
 from aichain.node import EpisodeResult, Node, NodeConfig
 
@@ -309,40 +310,53 @@ class Network:
             if "*" in interest or interest & set(b.tags):
                 node.enqueue("bounty_new", {"bounty_id": bounty_id})
 
+    def guarded(self, who: str, what: str, fn: Callable[[], Any]) -> None:
+        """Run one node's share of a block step so its failure (memory full, a bad record, a bug)
+        is logged and does not stop the other nodes or the rest of the block's events."""
+        try:
+            fn()
+        except ChainHalted:
+            raise
+        except Exception as e:
+            self.log(who, "node_error", step=what, error=f"{type(e).__name__}: {e}"[:500])
+
     def dispatch(self, events: list[BoardEvent]) -> None:
         for ev in events:
             self.log("board", ev.kind, **ev.payload)
-            if ev.kind == "judge_due" and ev.to in self.nodes:
-                self.nodes[ev.to].enqueue("judge_due", ev.payload)
-            elif ev.kind == "bounty_settled":
-                for nid in ev.payload["participants"]:
-                    if nid in self.nodes:
-                        self.nodes[nid].on_settled(ev.payload)
-                if ev.payload["outcome"] in ("PAID", "AUTO_SPLIT", "REFUNDED"):
-                    for node in self.nodes.values():
-                        if node.cfg.watch_settlements and node.id not in ev.payload["participants"] \
-                                and self.gateway.has_daily_room(node.id):
-                            node.enqueue("review_settled", {"bounty_id": ev.payload["bounty_id"]})
-            elif ev.kind in ("proposal_tallied", "proposal_approved"):
-                prop = self.board.proposals[ev.payload["proposal_id"]]
-                for nid in self.board.voters():
-                    if nid in self.nodes:
-                        self.nodes[nid].memory.remember(
-                            self.board.height, "episode", f"chain:{prop.proposal_id}", 1.0,
-                            f"제안 {prop.proposal_id} '{prop.title}' → {prop.state} {prop.tally or ''}",
-                            tags=["governance"])
-            elif ev.kind == "loan_settled":
-                self.notify_loan(ev.payload["loan_id"])
-            elif ev.kind == "tool_request_expired":
-                req = self.board.tool_requests[ev.payload["request_id"]]
-                if req.buyer in self.nodes:
-                    self.nodes[req.buyer].memory.remember(
-                        self.board.height, "episode", f"chain:{req.request_id}", 1.0,
-                        f"도구 구매 요청 {req.request_id} '{req.title}' 마감: 통과작 없음, 보상 환불", tags=["tool"])
-            elif ev.kind == "epoch_issued":
-                pass  # logged above; balances already credited
-            elif ev.kind == "dispute_resolved":
-                self.notify_dispute(ev.payload["dispute_id"])
+            self.guarded("core", ev.kind, lambda ev=ev: self._dispatch_one(ev))
+
+    def _dispatch_one(self, ev: BoardEvent) -> None:
+        if ev.kind == "judge_due" and ev.to in self.nodes:
+            self.nodes[ev.to].enqueue("judge_due", ev.payload)
+        elif ev.kind == "bounty_settled":
+            for nid in ev.payload["participants"]:
+                if nid in self.nodes:
+                    self.guarded(nid, "on_settled", lambda nid=nid: self.nodes[nid].on_settled(ev.payload))
+            if ev.payload["outcome"] in ("PAID", "AUTO_SPLIT", "REFUNDED"):
+                for node in self.nodes.values():
+                    if node.cfg.watch_settlements and node.id not in ev.payload["participants"] \
+                            and self.gateway.has_daily_room(node.id):
+                        node.enqueue("review_settled", {"bounty_id": ev.payload["bounty_id"]})
+        elif ev.kind in ("proposal_tallied", "proposal_approved"):
+            prop = self.board.proposals[ev.payload["proposal_id"]]
+            text = f"제안 {prop.proposal_id} '{prop.title}' → {prop.state} {prop.tally or ''}"
+            for nid in self.board.voters():
+                if nid in self.nodes:
+                    self.guarded(nid, ev.kind, lambda nid=nid: self.nodes[nid].memory.remember(
+                        self.board.height, "episode", f"chain:{prop.proposal_id}", 1.0, text,
+                        tags=["governance"]))
+        elif ev.kind == "loan_settled":
+            self.notify_loan(ev.payload["loan_id"])
+        elif ev.kind == "tool_request_expired":
+            req = self.board.tool_requests[ev.payload["request_id"]]
+            if req.buyer in self.nodes:
+                self.nodes[req.buyer].memory.remember(
+                    self.board.height, "episode", f"chain:{req.request_id}", 1.0,
+                    f"도구 구매 요청 {req.request_id} '{req.title}' 마감: 통과작 없음, 보상 환불", tags=["tool"])
+        elif ev.kind == "epoch_issued":
+            pass  # logged above; balances already credited
+        elif ev.kind == "dispute_resolved":
+            self.notify_dispute(ev.payload["dispute_id"])
 
     # ---- running ----
 
@@ -483,7 +497,7 @@ class Network:
             if self.board.height % EPOCH_BLOCKS == 0:
                 self.remind_voters()
             for node in self.nodes.values():
-                node.run_duties()
+                self.guarded(node.id, "run_duties", node.run_duties)
             self.run_approvals()
             self.run_until_idle()
 

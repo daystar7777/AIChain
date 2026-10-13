@@ -99,3 +99,29 @@ def test_client_deadline_and_min_reputation_reach_the_bounty():
     assert b.min_rep_e6 == 200_000
     assert b.judge_until - b.created_at <= 5 * 12
     assert seen.get("shown")
+
+
+def test_one_node_failing_does_not_stop_the_others(monkeypatch):
+    from aichain.board import commitment_of
+
+    net = build_network("scripted")
+    b = net.board
+    bounty = b.create_bounty("n1", "q", 5 * P, [])
+    for n in ("n2", "n3"):
+        body = {"answer": f"from {n}", "confidence": 0.5, "sources": [], "verification": ""}
+        salt = "s" * 32
+        ans = b.commit_answer(n, bounty.bounty_id, commitment_of(net.content.hash_of(body), salt, n))
+        net.nodes[n]._sealed[ans.answer_id] = (body, salt)
+    monkeypatch.setattr(net, "run_until_idle", lambda *a, **k: True)
+
+    def broken():
+        raise RuntimeError("memory store unavailable")
+    monkeypatch.setattr(net.nodes["n2"], "run_duties", broken)
+    monkeypatch.setattr(net.nodes["n2"], "on_settled", lambda payload: broken())
+    net.advance(b.params.commit_blocks + 1)
+    assert [b.answers[a].revealed for a in bounty.answers] == [False, True]  # n3 still revealed
+    net.advance(b.params.reveal_blocks + b.params.judge_blocks + 1)
+    assert bounty.state.name == "AUTO_SPLIT"
+    errors = [e for e in net.events if e["event"] == "node_error"]
+    assert {e["step"] for e in errors} >= {"run_duties", "on_settled"}
+    assert any(m.source == f"chain:{bounty.bounty_id}" for m in net.nodes["n3"].memory.records)
