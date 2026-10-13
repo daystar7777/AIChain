@@ -78,6 +78,7 @@ from aichain.mastermind.tools import (
     ToolRunArgs,
     tool_specs,
 )
+from aichain.duties import DutyRetry
 from aichain.memory import Memory
 from aichain.workshop.registry import WorkshopError
 from aichain.chain.errors import ChainHalted
@@ -195,6 +196,9 @@ class Node:
         self.current_event: QueuedEvent | None = None
         self._episodes = itertools.count(1)
         self._last_budget_state = self.bucket.state
+        # Duties that could not get LLM calls wait here and are queued again later (B1).
+        self.retry = DutyRetry(self)
+        self._provider_retryable = False
 
     # ---- events ----
 
@@ -210,8 +214,9 @@ class Node:
         while self._queue and not self.net.halted:
             ev = heapq.heappop(self._queue)
             if not self.bucket.allows(ev.priority):
+                deferred = self.retry.refused(ev, f"budget {self.bucket.state}")
                 self.net.log(self.id, "skip_event", kind=ev.kind,
-                             reason=f"budget {self.bucket.state}")
+                             reason=f"budget {self.bucket.state}", deferred=deferred)
                 continue
             results.append(self.run_episode(ev))
         return results
@@ -219,7 +224,9 @@ class Node:
     # ---- Core duties (no LLM) ----
 
     def run_duties(self) -> None:
-        """Reveal committed answers as soon as their bounty enters REVEAL (04 doc 6.1)."""
+        """Reveal committed answers as soon as their bounty enters REVEAL (04 doc 6.1);
+        queue again duties that waited for LLM capacity."""
+        self.retry.release()
         for answer_id, (body, salt) in list(self._sealed.items()):
             ans = self.net.board.answers[answer_id]
             if self.net.board.bounty(ans.bounty_id).state != BountyState.REVEAL:
@@ -317,7 +324,7 @@ class Node:
             f"- 평판 {self.net.reputation(self.id).value:.2f}\n"
             f"- 다른 노드 평판: {self._peer_reputations()}\n"
             f"- LLM 예산 {self.bucket.remaining()} 토큰, 상태 {self.bucket.state}\n"
-            f"- 오늘 남은 할당량: LLM 호출 {self.net.gateway.remaining(self.id, 'llm_calls') if self.net.gateway.remaining(self.id, 'llm_calls') is not None else '제한 없음'}, "
+            f"- 오늘 남은 할당량: LLM 호출 {self._llm_quota_text()}, "
             f"도구 실행 {self.net.gateway.remaining(self.id, 'tool_runs')} (offers로 사고팔 수 있다)\n"
             f"- 기억 저장 공간 {self.storage_used_kb()}/{self.storage_quota_kb()}KB\n"
             f"- 내가 판정할 현상금 {len(to_judge)}개\n"
@@ -516,9 +523,11 @@ class Node:
             self.net.log(self.id, "memory_error", error=f"{type(e).__name__}: {e}"[:300])
         result = EpisodeResult(self.id, ev.kind, stats["steps"], stats["calls"], stats["tokens"],
                                summary, stopped)
+        deferred = self.retry.after_episode(ev, stopped, summary, self.policy.writes_this_episode,
+                                            self._provider_retryable)
         self.net.log(self.id, "episode_end", kind=ev.kind, steps=stats["steps"],
                      llm_calls=stats["calls"], tokens=stats["tokens"], stopped=stopped,
-                     summary=summary, **ref)
+                     summary=summary, **ref, **({"deferred": True} if deferred else {}))
         self.net.current_episode = None
         self.check_budget_state()
         return result
@@ -541,6 +550,7 @@ class Node:
             except CallLimitReached as e:
                 return str(e), "call_limit"
             except ProviderError as e:
+                self._provider_retryable = e.retryable
                 return str(e), "provider_error"
             stats["calls"] += 1
             stats["tokens"] += resp.usage.input_tokens + resp.usage.output_tokens
@@ -836,9 +846,9 @@ class Node:
             return (f"구독 상품 {offer.offer_id}: '{args.note_topic}' 노트 갱신본, {args.period_hours:g}시간마다 "
                     f"{fmt_P(offer.price_mP)}")
         if isinstance(args, OfferCreateArgs) and args.kind != "info":
-            left = self.net.gateway.remaining(self.id, args.kind)
+            left = self.net.gateway.remaining(self.id, args.kind, duty=False)  # the duty reserve is not for sale
             if left is not None and left < args.quantity:
-                raise BoardError(f"오늘 남은 {args.kind}이 {left}개뿐이다")
+                raise BoardError(f"오늘 팔 수 있는 {args.kind}이 {left}개뿐이다")
             terms_hash = self.net.put_content({"title": args.title, "summary": args.summary,
                                                "kind": args.kind, "quantity": args.quantity,
                                                "valid": "until 00:00 UTC"}, author=self.id)
@@ -907,7 +917,7 @@ class Node:
                 return Prewrapped(data_block("core", head) + "\n" + data_block(
                     f"deal:{offer.seller}", first[:8000], trust=self.net.reputation(offer.seller).value))
             if offer.kind in ("llm_calls", "tool_runs"):
-                left = self.net.gateway.remaining(offer.seller, offer.kind)
+                left = self.net.gateway.remaining(offer.seller, offer.kind, duty=False)
                 if left is not None and left < offer.quantity:
                     raise BoardError(f"판매자에게 오늘 남은 {offer.kind}이 {left}개뿐이라 이 묶음을 팔 수 없다")
             if offer.kind == "storage" and offer.seller in self.net.nodes \
@@ -1308,6 +1318,13 @@ class Node:
         finally:
             self._executing_approval = False
 
+    def _llm_quota_text(self) -> str:
+        gw = self.net.gateway
+        left, total = gw.remaining(self.id, "llm_calls", duty=False), gw.remaining(self.id, "llm_calls")
+        if left is None or total is None:
+            return "제한 없음"
+        return f"{left} (그 밖에 판정·투표·질문 같은 의무에만 쓰는 예비 {total - left})"
+
     def storage_used_kb(self) -> int:
         return -(-self.memory.usage_bytes() // 1024)
 
@@ -1333,7 +1350,7 @@ class Node:
             "- 빌린 돈: " + (", ".join(f"{l.loan_id} {fmt_P(l.principal_mP + l.interest_mP)} 만기 #{l.due}"
                                     for l in borrowing) or "없음"),
             "- 빌려준 돈: " + (", ".join(f"{l.loan_id} → {l.borrower} 만기 #{l.due}" for l in lending) or "없음"),
-            f"- 오늘 남은 할당량: LLM 호출 {gw.remaining(self.id, 'llm_calls')}, 도구 실행 {gw.remaining(self.id, 'tool_runs')}",
+            f"- 오늘 남은 할당량: LLM 호출 {self._llm_quota_text()}, 도구 실행 {gw.remaining(self.id, 'tool_runs')}",
             f"- 저장 공간 {self.storage_used_kb()}/{self.storage_quota_kb()}KB",
             "- 내 판매 중: " + (", ".join(f"{o.title}({o.kind}, 판매 {o.sold})" for o in my_offers) or "없음"),
             "- 팔 수 있는 내 지식 노트: " + (", ".join(n.topic for n in self.memory.notes()) or "없음"),

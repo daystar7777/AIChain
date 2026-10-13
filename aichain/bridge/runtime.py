@@ -289,6 +289,15 @@ class NetworkRuntime:
                 self._by_bounty[e["bounty_id"]] = rec.ref
                 rec.bounty = self._bounty_view(e["bounty_id"])
                 self._push(rec, "bounty_open", {"bounty": rec.bounty})
+            elif kind == "duty_deferred" and e.get("kind") == "bridge_question" and rec.bounty_id is None:
+                # No LLM capacity right now: the node retries it later instead of dropping it.
+                rec.note = f"waiting for LLM capacity; the node will retry ({e.get('reason')})"
+                self._push(rec, "queued", {"note": rec.note, "attempts": e.get("attempts")})
+            elif kind == "duty_dropped" and e.get("kind") == "bridge_question" and rec.bounty_id is None:
+                rec.note = f"gave up: {e.get('reason')}"
+                self._push(rec, "failed", {"note": rec.note})
+            elif kind == "episode_end" and e.get("kind") == "bridge_question" and e.get("deferred"):
+                pass  # reported by duty_deferred
             elif kind == "episode_end" and e.get("kind") == "bridge_question":
                 rec.note = e.get("summary")
                 if rec.bounty_id is None:

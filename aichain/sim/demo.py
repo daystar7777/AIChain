@@ -71,6 +71,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="interests from `python -m aichain.setup`")
     ap.add_argument("--daily-calls-per-node", type=int, default=50)
     ap.add_argument("--daily-calls-total", type=int, default=200)
+    ap.add_argument("--duty-reserve-share", type=float, default=0.2,
+                    help="share of both daily call caps kept for duties (judging, votes, disputes, "
+                         "Bridge and operator questions, answers); research, economy ticks and "
+                         "reflection stop at this line")
     ap.add_argument("--search-daily-cap", type=int, default=60,
                     help="max Brave Search API queries per UTC day (paid)")
     ap.add_argument("--workshop", action="store_true",
@@ -97,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
                                 interests=node_setup.load(args.nodes_file),
                                 daily_calls_per_node=args.daily_calls_per_node,
                                 daily_calls_total=args.daily_calls_total,
+                                duty_reserve_share=args.duty_reserve_share,
                                 workshop=make_workshop(args))
         except ConfigError as e:
             print(e, file=sys.stderr)

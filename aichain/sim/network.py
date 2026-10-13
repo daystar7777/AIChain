@@ -21,7 +21,7 @@ from aichain.memory import KnowledgeStore
 from aichain.workshop.registry import Workshop
 from aichain.chain.crypto import KeyStore
 from aichain.chain.store import ROOT_ACCOUNT, ChainStore, attach as attach_chain
-from aichain.node import EpisodeResult, Node, NodeConfig
+from aichain.node import PRIORITY, EpisodeResult, Node, NodeConfig
 
 SECONDS_PER_BLOCK = 5
 
@@ -111,9 +111,8 @@ class Network:
     def announce_proposal(self, proposal_id: str) -> None:
         prop = self.board.proposals[proposal_id]
         for node in self.nodes.values():
-            if node.id != prop.proposer and node.id in self.board.voters() \
-                    and self.gateway.has_daily_room(node.id):
-                node.enqueue("proposal_open", {"proposal_id": proposal_id})
+            if node.id != prop.proposer and node.id in self.board.voters():
+                node.enqueue("proposal_open", {"proposal_id": proposal_id})  # a duty: retried if refused
 
     def complete_purchase(self, purchase_id: str) -> str | None:
         """Core-to-Core delivery of an info purchase, end-to-end encrypted:
@@ -202,7 +201,7 @@ class Network:
     def announce_loan(self, loan_id: str) -> None:
         loan = self.board.loans[loan_id]
         for node in self.nodes.values():
-            if node.id != loan.borrower and self.gateway.has_daily_room(node.id):
+            if node.id != loan.borrower and self.gateway.has_daily_room(node.id, PRIORITY["loan_request_new"]):
                 node.enqueue("loan_request_new", {"loan_id": loan_id})
 
     def notify_loan(self, loan_id: str) -> None:
@@ -351,7 +350,7 @@ class Network:
         for node in self.nodes.values():
             if node_ids is not None and node.id not in node_ids:
                 continue
-            if not self.gateway.has_daily_room(node.id):
+            if not self.gateway.has_daily_room(node.id, PRIORITY["reflect"]):
                 continue
             marker = next((r for r in reversed(node.memory.records)
                            if r.kind == "reflection" and r.source == "chain:reflect"), None)
@@ -407,7 +406,7 @@ class Network:
     def research(self, node_ids: list[str] | None = None) -> None:
         for node in self.nodes.values():
             if (node_ids is None or node.id in node_ids) and node.cfg.interests:
-                if not self.gateway.has_daily_room(node.id):
+                if not self.gateway.has_daily_room(node.id, PRIORITY["research_tick"]):
                     continue  # no LLM calls left today: don't queue work that cannot run
                 node.enqueue("research_tick", {})
 
@@ -432,7 +431,7 @@ class Network:
                 for i, nid in enumerate(ids):
                     node = self.nodes[nid]
                     if (self.board.height + i * offset + offset // 2) % e == 0 and not node.has_pending \
-                            and self.gateway.has_daily_room(nid):
+                            and self.gateway.has_daily_room(nid, PRIORITY["economy_tick"]):
                         node.enqueue("economy_tick", {})
             n = self.research_interval_blocks
             if n and self.board.height % n == 0:
