@@ -11,6 +11,7 @@ from __future__ import annotations
 import bisect
 import functools
 import inspect
+import itertools
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any, Callable
@@ -40,6 +41,29 @@ INCOME_WINDOW_EPOCHS = 24  # rules 2: pairwise netting window for contribution i
 LOAN_DEFAULT_PENALTY_BP = 1000  # rules 2: a defaulted lender recovers at most owed + 10%
 LOAN_REQUEST_BLOCKS = 17_280  # rules 2: an unfunded loan request expires after one day
 CONFIRM_BLOCKS = 720  # rules 2: a delivered purchase not confirmed within an hour completes
+
+
+# What the block loop (`_on_block`) can still act on, per collection. Every object only moves
+# forward through its states and never re-enters this set once it has left it, so the loop keeps
+# an index of these objects instead of walking every object ever created (gap review B3).
+LIVE_IN_BLOCK_LOOP: dict[str, Callable[[Any], bool]] = {
+    "bounties": lambda b: b.state in (BountyState.OPEN, BountyState.REVEAL, BountyState.JUDGING)
+    or (b.state in SETTLED_STATES and b.settled_at is not None),
+    "offers": lambda o: o.state == "OPEN",
+    "purchases": lambda p: p.state in ("PENDING", "DELIVERED"),
+    "deposits": lambda d: d.state == "LOCKED",
+    "loans": lambda loan: loan.state in ("REQUESTED", "ACTIVE"),
+    "subscriptions": lambda s: s.state == "ACTIVE",
+    "tool_requests": lambda r: r.state == "OPEN",
+    "proposals": lambda p: p.state in ("VOTING", "TIMELOCK"),
+    "disputes": lambda d: d.state == "open",
+}
+# Board attributes a snapshot carries, and the ones that belong to the running process.
+SNAPSHOT_FIELDS = ("params", "rules", "height", "accounts", "bounties", "answers", "escrow_mP",
+                   "burned_mP", "issued_mP", "rep_events", "_seq", "_heartbeats", "tools", "disputes",
+                   "proposals", "tool_requests", "offers", "purchases", "subscriptions", "loans",
+                   "deposits", "ratings", "licenses")
+RUNTIME_FIELDS = {"recorder", "halted", "chain_state", "_on_block", "_live_index", "_live_seen"}
 
 
 def _enc(obj: Any) -> dict[str, Any]:
@@ -388,6 +412,9 @@ class Board:
         self.deposits: dict[str, Deposit] = {}
         self.ratings: dict[str, Rating] = {}
         self.licenses: set[tuple[str, str, int]] = set()  # (account, tool_id, version)
+        # Block-loop index (see LIVE_IN_BLOCK_LOOP): derived, rebuilt on demand, not consensus state.
+        self._live_index: dict[str, dict[Any, None]] = {}
+        self._live_seen: dict[str, int] = {}
 
     # ---- accounts ----
 
@@ -1498,7 +1525,7 @@ class Board:
                 for lk in due:
                     acct.locks.remove(lk)
                     acct.locked_mP -= lk[0]
-        for b in self.bounties.values():
+        for b in self._live("bounties"):
             ev = self._transition(b, h)
             if ev:
                 events.append(ev)
@@ -1506,10 +1533,10 @@ class Board:
             ev = self._issue_epoch(h // self.params.epoch_blocks - 1)
             if ev:
                 events.append(ev)
-        for o in self.offers.values():
+        for o in self._live("offers"):
             if o.state == "OPEN" and h >= o.expires:
                 o.state = "EXPIRED"
-        for pu in self.purchases.values():
+        for pu in self._live("purchases"):
             if pu.state == "PENDING" and h >= pu.deliver_until:
                 pu.state = "REFUNDED"
                 self._pay_from_escrow(pu.buyer, pu.price_mP, lock=False)
@@ -1520,13 +1547,13 @@ class Board:
                 self._complete_purchase(pu)
                 events.append(BoardEvent("purchase_completed", None, {"purchase_id": pu.purchase_id,
                                                                       "reason": "confirm_timeout"}))
-        for dep in self.deposits.values():
+        for dep in self._live("deposits"):
             if dep.state == "LOCKED" and h >= dep.unlock:
                 self._pay_from_escrow(dep.owner, dep.amount_mP + dep.earned_mP, lock=False)
                 dep.state = "MATURED"
                 events.append(BoardEvent("deposit_matured", None, {"deposit_id": dep.deposit_id,
                                                                    "owner": dep.owner, "earned_mP": dep.earned_mP}))
-        for loan in self.loans.values():
+        for loan in self._live("loans"):
             if loan.state == "REQUESTED" and loan.request_until is not None and h >= loan.request_until:
                 loan.state, loan.settled_height = "CANCELLED", h
                 self._pay_from_escrow(loan.borrower, loan.collateral_mP, lock=False)
@@ -1536,7 +1563,7 @@ class Board:
                 self._settle_loan(loan, at_due=True)
                 events.append(BoardEvent("loan_settled", None, {"loan_id": loan.loan_id, "state": loan.state,
                                                                 "borrower": loan.borrower, "lender": loan.lender}))
-        for sub in self.subscriptions.values():
+        for sub in self._live("subscriptions"):
             if sub.state == "ACTIVE" and h >= sub.period_start + sub.period_blocks:
                 self._close_period(sub)
                 offer = self.offers[sub.offer_id]
@@ -1548,22 +1575,91 @@ class Board:
                 events.append(BoardEvent("subscription_period", None, {
                     "sub_id": sub.sub_id, "state": sub.state, "paid": sub.periods_paid,
                     "refunded": sub.periods_refunded}))
-        for req in self.tool_requests.values():
+        for req in self._live("tool_requests"):
             if req.state == "OPEN" and h >= req.deadline:
                 req.state = "EXPIRED"
                 self._pay_from_escrow(req.buyer, req.reward_mP, lock=False)
                 events.append(BoardEvent("tool_request_expired", None, {"request_id": req.request_id}))
-        for prop in self.proposals.values():
+        for prop in self._live("proposals"):
             if prop.state == "VOTING" and h >= prop.vote_until:
                 events.append(self._tally(prop))
             elif prop.state == "TIMELOCK" and prop.timelock_until is not None and h >= prop.timelock_until:
                 events.append(self._approve(prop))
-        for d in self.disputes.values():
+        for d in self._live("disputes"):
             if d.state == "open" and h >= d.deadline:
                 self._settle_dispute(d, "void", None)  # no ruling in time: bond returned
                 events.append(BoardEvent("dispute_resolved", None, {
                     "dispute_id": d.dispute_id, "ruling": "void", "reason": "deadline"}))
         return events
+
+    def _live(self, name: str) -> Any:
+        """The objects of one collection the block loop may still act on, in creation order (the
+        order the full collection would be walked in). New objects are picked up from the end of
+        the collection; an object is dropped once it has left LIVE_IN_BLOCK_LOOP."""
+        coll = getattr(self, name)
+        index = self._live_index.setdefault(name, {})
+        seen = self._live_seen.get(name, 0)
+        if len(coll) > seen:
+            for key in itertools.islice(coll, seen, None):
+                index[key] = None
+            self._live_seen[name] = len(coll)
+        live = LIVE_IN_BLOCK_LOOP[name]
+        for key in list(index):
+            obj = coll[key]
+            if live(obj):
+                yield obj
+            if not live(obj):
+                del index[key]
+
+    # ---- snapshots (gap review B3) ----
+
+    def to_snapshot(self) -> dict[str, Any]:
+        """The whole consensus state as plain JSON data, in collection order."""
+        unknown = set(vars(self)) - set(SNAPSHOT_FIELDS) - RUNTIME_FIELDS
+        if unknown:
+            raise BoardError(f"snapshot does not cover board fields {sorted(unknown)}")
+        rows = lambda coll: [asdict(v) for v in coll.values()]  # noqa: E731
+        return {
+            "params": asdict(self.params), "rules": self.rules, "height": self.height,
+            "escrow_mP": self.escrow_mP, "burned_mP": self.burned_mP, "issued_mP": self.issued_mP,
+            "_seq": self._seq, "rep_events": self.rep_events,
+            "_heartbeats": sorted([a, e] for a, e in self._heartbeats),
+            "licenses": sorted(list(x) for x in self.licenses),
+            **{name: rows(getattr(self, name)) for name in (
+                "accounts", "bounties", "answers", "tools", "disputes", "proposals", "tool_requests",
+                "offers", "purchases", "subscriptions", "loans", "deposits", "ratings")},
+        }
+
+    def restore(self, data: dict[str, Any]) -> None:
+        """Replace this board's state with a snapshot (in place: the network keeps its reference)."""
+        params = dict(data["params"])
+        params["commit_blocks_range"] = tuple(params["commit_blocks_range"])
+        self.params = Params(**params)
+        self.rules, self.height = data["rules"], data["height"]
+        self.escrow_mP, self.burned_mP, self.issued_mP = data["escrow_mP"], data["burned_mP"], data["issued_mP"]
+        self._seq, self.rep_events = data["_seq"], data["rep_events"]
+        self._heartbeats = {(a, e) for a, e in data["_heartbeats"]}
+        self.licenses = {tuple(x) for x in data["licenses"]}
+        self.accounts = {a["id"]: Account(**{**a, "locks": [tuple(lk) for lk in a["locks"]]})
+                         for a in data["accounts"]}
+
+        def bounty(b: dict[str, Any]) -> Bounty:
+            return Bounty(**{**b, "state": BountyState(b["state"]),
+                             "outcome": BountyState(b["outcome"]) if b["outcome"] else None})
+
+        self.bounties = {b["bounty_id"]: bounty(b) for b in data["bounties"]}
+        self.answers = {a["answer_id"]: Answer(**a) for a in data["answers"]}
+        self.tools = {(t["tool_id"], t["version"]): ToolListing(**t) for t in data["tools"]}
+        self.disputes = {d["dispute_id"]: Dispute(**d) for d in data["disputes"]}
+        self.proposals = {p["proposal_id"]: Proposal(**p) for p in data["proposals"]}
+        self.tool_requests = {r["request_id"]: ToolRequest(**r) for r in data["tool_requests"]}
+        self.offers = {o["offer_id"]: Offer(**o) for o in data["offers"]}
+        self.purchases = {p["purchase_id"]: Purchase(**p) for p in data["purchases"]}
+        self.subscriptions = {s["sub_id"]: Subscription(**s) for s in data["subscriptions"]}
+        self.loans = {x["loan_id"]: Loan(**x) for x in data["loans"]}
+        self.deposits = {d["deposit_id"]: Deposit(**d) for d in data["deposits"]}
+        self.ratings = {r["rating_id"]: Rating(**r) for r in data["ratings"]}
+        self._live_index, self._live_seen = {}, {}
 
     def _issue_epoch(self, epoch: int) -> BoardEvent | None:
         """End-of-epoch issuance (03 doc 2.2): 60% uptime pool shared equally by accounts with a
