@@ -225,10 +225,12 @@ class Node:
     # ---- Core duties (no LLM) ----
 
     def run_duties(self) -> None:
-        """Reveal committed answers as soon as their bounty enters REVEAL (04 doc 6.1);
-        queue again duties that waited for LLM capacity; once a day fold Core's week-old records
-        into a digest so they cannot grow without bound (they do not count in the storage quota)."""
+        """Every block: reveal committed answers as soon as their bounty enters REVEAL (04 doc 6.1),
+        queue again duties that waited for LLM capacity, stop subscription renewals the Policy
+        Guard would refuse; once a day fold Core's week-old records into a digest so they cannot
+        grow without bound (they do not count in the storage quota)."""
         self.retry.release()
+        self._stop_unaffordable_renewals()
         h = self.net.board.height
         if h and h % DIGEST_EVERY_BLOCKS == 0 and h > CORE_KEEP_BLOCKS:
             digest = self.memory.compact(h - CORE_KEEP_BLOCKS, h)
@@ -256,6 +258,41 @@ class Node:
         self.memory.remember(self.net.board.height, "episode", f"chain:{b.bounty_id}", 1.0, text,
                              tags=b.tags)
         self.net.log(self.id, "memory", kind="episode", source=f"chain:{b.bounty_id}", content=text)
+
+    def on_subscription_period(self, sub: Any) -> None:
+        """Core: a period of my subscription closed on chain and it renewed (or ended) by itself.
+        The Mastermind never approved the renewal, so it is noted where it will see it, and counted
+        as a spend for the Policy Guard."""
+        h, title = self.net.board.height, self.net.board.offers[sub.offer_id].title
+        if sub.state == "ACTIVE":
+            self.policy.record_spend(sub.price_mP, h)
+            text = (f"구독 {sub.sub_id} '{title}'(판매자 {sub.seller})이 자동 갱신됨: 다음 기간 요금 "
+                    f"{fmt_P(sub.price_mP)} 에스크로, 블록 {sub.period_start + sub.period_blocks}까지. 지금까지 결제 "
+                    f"{sub.periods_paid}기간, 환불 {sub.periods_refunded}기간. 필요 없으면 subscriptions(cancel=...).")
+        else:
+            text = (f"구독 {sub.sub_id} '{title}'이 갱신되지 않고 끝남(잔액 부족 또는 판매 중단). "
+                    f"결제 {sub.periods_paid}기간, 환불 {sub.periods_refunded}기간.")
+        self.memory.remember(h, "episode", f"chain:{sub.sub_id}", 1.0, text, ["subscription"])
+        self.net.log(self.id, "subscription_renewed" if sub.state == "ACTIVE" else "subscription_ended",
+                     sub_id=sub.sub_id, price=fmt_P(sub.price_mP), paid=sub.periods_paid,
+                     refunded=sub.periods_refunded)
+
+    def _stop_unaffordable_renewals(self) -> None:
+        """Core: cancel my subscription in its last block when the coming automatic renewal would
+        break my Policy Guard spending limits (the Mastermind never sees that spend coming)."""
+        board, h = self.net.board, self.net.board.height
+        for sub in list(board.subscriptions.values()):
+            if sub.subscriber != self.id or sub.state != "ACTIVE" or h + 1 < sub.period_start + sub.period_blocks:
+                continue
+            problem = self.policy.spend_problem(sub.price_mP, board.account(self.id).available_mP, h + 1)
+            if problem is None:
+                continue
+            board.cancel_subscription(self.id, sub.sub_id)
+            self.memory.remember(h, "episode", f"chain:{sub.sub_id}", 1.0,
+                                 f"구독 {sub.sub_id} 해지(Core): 다음 갱신 요금 {fmt_P(sub.price_mP)}이 지출 한도를 "
+                                 f"넘어서 갱신 전에 끊었다 ({problem}). 결제 {sub.periods_paid}기간, "
+                                 f"환불 {sub.periods_refunded}기간.", ["subscription"])
+            self.net.log(self.id, "subscription_cancelled", sub_id=sub.sub_id, by="core", reason=problem)
 
     def restore_from_chain(self) -> None:
         """After a restart: reload sealed answers and re-raise judging duties missed while down."""

@@ -12,7 +12,7 @@ from typing import Any, Callable, TextIO
 
 from aichain import audit
 from aichain.board import Board, BoardError, BoardEvent, Params
-from aichain.common import sha256_hex
+from aichain.common import canonical_json, sha256_hex
 from aichain.reputation import EPOCH_BLOCKS, Reputation, for_board
 from aichain.content import ContentStore
 from aichain.gateways.llm.base import LLMGateway
@@ -174,7 +174,8 @@ class Network:
         return opened
 
     def deliver_subscription(self, sub_id: str) -> str | None:
-        """Core: send the seller's current note on the subscribed topic, sealed to the subscriber."""
+        """Core: send the seller's current note on the subscribed topic, sealed to the subscriber.
+        Only a note that changed since the last delivery counts: re-saving it is not a delivery."""
         from aichain.chain.crypto import seal_for
 
         sub = self.board.subscriptions[sub_id]
@@ -185,15 +186,22 @@ class Network:
         note = seller.memory.latest_note(topic) if topic else None
         if note is None or not note.data:
             return None
+        digest = sha256_hex(canonical_json({"topic": note.topic, **note.data}))
+        if seller.private.get(f"sub_sent:{sub_id}") == digest:
+            return None
         text = json.dumps({"topic": note.topic, "version_seq": note.seq, **note.data}, ensure_ascii=False, indent=1)
         box = seal_for(self.board.account(sub.subscriber).pubkey, text.encode())
         c_hash = self.put_content({"sealed_for": sub.subscriber, "box": box}, author=sub.seller)
         self.board.sub_deliver(sub.seller, sub_id, c_hash)
+        seller.private[f"sub_sent:{sub_id}"] = digest
+        if self.chain is not None:
+            self.chain.put_private(sub.seller, f"sub_sent:{sub_id}", digest)
         opened = self.keys.open_sealed(sub.subscriber, box).decode()
+        prev = next((r for r in reversed(buyer.memory.records) if r.data and r.data.get("sub_id") == sub_id), None)
         buyer.memory.remember(self.board.height, "fact", f"deal:{sub.seller}",
                               round(self.reputation(sub.seller).value, 3),
                               f"[구독 {topic}] {opened[:1500]}", ["deal", "subscription", topic[:40]], [c_hash],
-                              data={"sub_id": sub_id})
+                              data={"sub_id": sub_id}, supersedes=prev.hash if prev else None)
         self.log("core", "subscription_delivered", sub_id=sub_id, seller=sub.seller,
                  subscriber=sub.subscriber, topic=topic)
         return opened
@@ -315,6 +323,10 @@ class Network:
                             tags=["governance"])
             elif ev.kind == "loan_settled":
                 self.notify_loan(ev.payload["loan_id"])
+            elif ev.kind == "subscription_period":  # renewed (or ended) on chain without the subscriber
+                sub = self.board.subscriptions[ev.payload["sub_id"]]
+                if sub.subscriber in self.nodes:
+                    self.nodes[sub.subscriber].on_subscription_period(sub)
             elif ev.kind == "tool_request_expired":
                 req = self.board.tool_requests[ev.payload["request_id"]]
                 if req.buyer in self.nodes:

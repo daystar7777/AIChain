@@ -55,13 +55,20 @@ class PolicyGuard:
             self._violate(f"write tool limit per episode ({self.limits.writes_per_episode}) reached")
 
     def check_spend(self, amount_mP: int, balance_mP: int, height: int, *, bounty: bool) -> None:
+        problem = self.spend_problem(amount_mP, balance_mP, height, bounty=bounty)
+        if problem:
+            self._violate(problem)
+
+    def spend_problem(self, amount_mP: int, balance_mP: int, height: int, *, bounty: bool = False) -> str | None:
+        """The limit this spend would break, or None. No side effects: Core uses it for spends
+        the Mastermind does not make itself (e.g. automatic subscription renewals)."""
         if bounty and amount_mP > self.bounty_cap_mP(balance_mP):
-            self._violate(
-                f"bounty {amount_mP}mP exceeds per-bounty cap {self.bounty_cap_mP(balance_mP)}mP "
-                f"(10% of balance)")
+            return (f"bounty {amount_mP}mP exceeds per-bounty cap {self.bounty_cap_mP(balance_mP)}mP "
+                    f"(10% of balance)")
         limit = self.hourly_limit_mP(balance_mP)
         if self.spent_last_hour(height) + amount_mP > limit:
-            self._violate(f"hourly spend limit {limit}mP would be exceeded")
+            return f"hourly spend limit {limit}mP would be exceeded"
+        return None
 
     def check_dispute(self, height: int) -> None:
         recent = [x for x in self.disputes if x > height - BLOCKS_PER_DAY]
