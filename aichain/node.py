@@ -1368,7 +1368,9 @@ class Node:
         available = self.net.board.account(self.id).available_mP
         if not book.policy.needs_approval(name, amount, available):
             return None
-        self.policy.check_outflow(amount, available, self.net.board.height)  # the attempt counts (04 doc 3.4)
+        # The attempt counts (04 doc 3.4), together with this node's other outflows held in the last hour.
+        held = sum(x.amount_mP for x in book.pending(self.id) if x.created >= book.clock() - 3600)
+        self.policy.check_outflow(amount + held, available, self.net.board.height)
         reason = getattr(args, "memo", "") or json.dumps(json.loads(raw_args or "{}"), ensure_ascii=False)[:300]
         a = book.request(self.id, name, raw_args or "{}", amount, reason)
         self.net.log(self.id, "approval_requested", approval_id=a.approval_id, tool=name,

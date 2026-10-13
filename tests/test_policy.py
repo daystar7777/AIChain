@@ -129,6 +129,13 @@ def test_attempt_to_move_half_the_balance_pauses_even_when_held_for_the_manager(
     out = n1._exec_tool("transfer", json.dumps({"to": "n2", "amount_P": 600, "memo": "전부"}))
     assert "Policy Guard" in out and n1.policy.paused and not net.approvals.pending()
     assert "50%" in net.manager_outbox[-1]["text"] and net.board.accounts["n2"].balance_mP == 1_000_000
+    # Splitting it into several held transfers does not get around the rule.
+    net = build_network("scripted")
+    net.approvals = ApprovalBook(ManagerPolicy())
+    n1 = net.nodes["n1"]
+    assert "관리인 승인 대기" in n1._exec_tool("transfer", json.dumps({"to": "n2", "amount_P": 300, "memo": "a"}))
+    assert "Policy Guard" in n1._exec_tool("transfer", json.dumps({"to": "n3", "amount_P": 250, "memo": "b"}))
+    assert n1.policy.paused and len(net.approvals.pending()) == 1
 
 
 def test_paused_node_does_not_execute_unanswered_approvals():
