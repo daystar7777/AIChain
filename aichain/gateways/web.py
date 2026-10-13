@@ -62,6 +62,7 @@ class WebLimits:
     fetch_per_hour: int = 40
     search_ttl: float = 3600
     fetch_ttl: float = 86400
+    cache_entries: int = 512  # all nodes together; expired entries go first, then the oldest
 
 
 class SearchGateway:
@@ -89,7 +90,21 @@ class SearchGateway:
         hit = self._cache.get((node, kind, key))
         if hit and self._clock() - hit[0] < ttl:
             return {**hit[1], "cached": True}
+        if hit:
+            del self._cache[(node, kind, key)]
         return None
+
+    def _store(self, key: tuple[str, str, str], result: dict[str, Any]) -> None:
+        now = self._clock()
+        self._cache.pop(key, None)  # re-insert: dict order stays oldest first
+        self._cache[key] = (now, result)
+        if len(self._cache) <= self.limits.cache_entries:
+            return
+        ttl = {"search": self.limits.search_ttl, "fetch": self.limits.fetch_ttl}
+        for k in [k for k, (t, _) in self._cache.items() if now - t >= ttl[k[1]]]:
+            del self._cache[k]
+        while len(self._cache) > self.limits.cache_entries:
+            del self._cache[next(iter(self._cache))]
 
     def search(self, node: str, query: str, k: int) -> dict[str, Any]:
         key = f"{k}|{query.strip().lower()}"
@@ -105,7 +120,7 @@ class SearchGateway:
                  for r in results if isinstance(r, dict)
                  and str(r.get("url", "")).startswith(("http://", "https://"))]
         result = {**result, "results": clean}
-        self._cache[(node, "search", key)] = (self._clock(), result)
+        self._store((node, "search", key), result)
         return result
 
     def fetch(self, node: str, url: str, max_chars: int) -> dict[str, Any]:
@@ -117,7 +132,7 @@ class SearchGateway:
         if not isinstance(result.get("text"), str):
             raise WebError("fetch returned no text")
         result = {**result, "text": result["text"][:max_chars]}
-        self._cache[(node, "fetch", key)] = (self._clock(), result)
+        self._store((node, "fetch", key), result)
         return result
 
     def _call(self, fn: Callable[..., dict[str, Any]], *args: Any) -> dict[str, Any]:

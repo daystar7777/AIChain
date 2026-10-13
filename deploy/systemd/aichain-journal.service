@@ -3,18 +3,27 @@
 [Unit]
 Description=AIChain journal viewer (read-only)
 After=network.target
+# Keep retrying (with growing delays) and alert on every failure (aichain-alert@).
+StartLimitIntervalSec=0
+OnFailure=aichain-alert@%n.service
 
 [Service]
 WorkingDirectory=/opt/aichain
 ExecStart=/opt/aichain/.venv/bin/python -m aichain.journal.viewer --db /opt/aichain/data/journal/journal.db --knowledge /opt/aichain/data/knowledge/knowledge.db --reports /opt/aichain/data/reports --host 127.0.0.1 --port 8790
 Restart=on-failure
 RestartSec=3
+RestartSteps=6
+RestartMaxDelaySec=5min
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 # SQLite readers in WAL mode need write access to the -shm file next to the database.
 ReadWritePaths=/opt/aichain/data/journal /opt/aichain/data/knowledge
+# Memory: responses are paged (timeline batches of 1000 without LLM prompts); 512M leaves room
+# for a few open browsers. SQLite reads go through the page cache, outside this limit.
+MemoryHigh=384M
+MemoryMax=512M
 
 [Install]
 WantedBy=multi-user.target

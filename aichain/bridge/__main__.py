@@ -5,14 +5,17 @@
     uv run python -m aichain.bridge --provider opencode-go --max-calls 40
 
 Binds to loopback only unless --allow-public is given (expose it behind nginx later).
+
+Exit codes: 2 configuration, 3 chain log failed verification, 4 the chain halted (the log could
+not be written); systemd restarts the service on all of them and alerts (deploy/systemd).
 """
 
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import ipaddress
 import sys
-import time
 from pathlib import Path
 
 import uvicorn
@@ -26,6 +29,7 @@ from aichain.journal.store import Journal
 from aichain.memory import KnowledgeStore
 from aichain.chain.crypto import MissingKey
 from aichain.chain.store import ChainStore, ReplayMismatch
+from aichain.ops import DailyTrace, Watchdog
 from aichain.sim.demo import make_workshop
 from aichain.sim.factory import (
     ROOT,
@@ -35,6 +39,9 @@ from aichain.sim.factory import (
     load_default_env,
     make_web,
 )
+
+
+EXIT_HALTED = 4
 
 
 def _is_loopback(host: str) -> bool:
@@ -69,6 +76,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="keep traded information bodies in the journal (development; turn off later)")
     ap.add_argument("--journal-keep-prompts-days", type=float, default=14.0,
                     help="drop LLM prompt text from journal entries older than this (0 keeps forever)")
+    ap.add_argument("--trace-keep-days", type=float, default=14.0,
+                    help="JSONL trace: one file per UTC day in data/, older files are deleted")
+    ap.add_argument("--halt-exit-seconds", type=float, default=120.0,
+                    help="when the chain halts: alert, keep answering for this long, then exit with "
+                         "code 4 so systemd restarts the service and replays the chain log")
+    ap.add_argument("--watchdog-stall-minutes", type=float, default=20.0,
+                    help="under systemd WatchdogSec=: stop pinging when the network loop shows no "
+                         "progress (block, log entry, LLM call) for this long")
     ap.add_argument("--research", action="store_true",
                     help="let idle nodes research their interests on the web (off by default)")
     ap.add_argument("--research-minutes", type=float, default=30.0)
@@ -99,16 +114,19 @@ def main(argv: list[str] | None = None) -> int:
     if not _is_loopback(args.host) and not args.allow_public:
         print(f"refusing to bind {args.host}: use 127.0.0.1 or pass --allow-public", file=sys.stderr)
         return 2
+    try:
+        faulthandler.enable()  # a watchdog kill (SIGABRT) prints every thread's stack to the journal
+    except (OSError, ValueError):  # stderr without a file descriptor
+        pass
     load_default_env()
     tokens = TokenStore.load(args.tokens)
     if not tokens.clients:
         print(f"no clients in {args.tokens}; create one with: python -m aichain.bridge.tokens new <client>",
               file=sys.stderr)
         return 2
-    trace_path = ROOT / "data" / f"bridge-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
-    trace_path.parent.mkdir(parents=True, exist_ok=True)
     params = SHORT_PARAMS if args.periods == "short" else Params()
-    with trace_path.open("w", encoding="utf-8", buffering=1) as trace:
+    # Also expires the per-restart trace files older versions left in data/ (same name prefix).
+    with DailyTrace(ROOT / "data", "bridge", keep_days=args.trace_keep_days) as trace:
         try:
             interval = (max(1, round(args.research_minutes * 60 / args.block_seconds))
                         if args.research else None)
@@ -156,7 +174,11 @@ def main(argv: list[str] | None = None) -> int:
             journal.attach(net)
         runtime = NetworkRuntime(net, block_seconds=args.block_seconds,
                                  state_path=ROOT / "data" / "bridge_state.json")
-        print(f"trace: {trace_path}", file=sys.stderr)
+        if journal:
+            runtime.tick_hooks.append(journal.tick)
+        runtime.halt_exit_seconds = args.halt_exit_seconds
+        exit_code = 0
+        print(f"trace: {trace.path} (one file per UTC day, kept {args.trace_keep_days:g} days)", file=sys.stderr)
         print(f"chain replayed: {net.chain_stats}", file=sys.stderr)
         if journal:
             net.log("core", "chain_replayed", **(net.chain_stats or {}))
@@ -169,13 +191,32 @@ def main(argv: list[str] | None = None) -> int:
             with os.fdopen(fd, "w") as f:
                 f.write("adm_" + _secrets.token_urlsafe(32))
         admin_token = admin_path.read_text().strip()
+        # Open SSE streams would otherwise hold a shutdown (halt exit, systemctl stop) forever.
+        server = uvicorn.Server(uvicorn.Config(create_app(runtime, tokens, admin_token=admin_token),
+                                               host=args.host, port=args.port, log_level="info",
+                                               timeout_graceful_shutdown=10))
+
+        def on_fatal(reason: str) -> None:  # runs on the network thread
+            nonlocal exit_code
+            exit_code = EXIT_HALTED
+            print(f"chain halted: {reason}; exiting with code {EXIT_HALTED} so systemd restarts the "
+                  "service", file=sys.stderr, flush=True)
+            server.should_exit = True
+
+        runtime.on_fatal = on_fatal
+        # READY=1 once the network loop runs, then watchdog pings while it makes progress.
+        watchdog = Watchdog(lambda: runtime.progress_at, stall_seconds=args.watchdog_stall_minutes * 60,
+                            status=lambda: f"block #{net.board.height}" + (" (halted)" if net.halted else ""))
+        watchdog.start()
         try:
-            uvicorn.run(create_app(runtime, tokens, admin_token=admin_token), host=args.host,
-                        port=args.port, log_level="info")
+            server.run()
         finally:
+            watchdog.stop()
             if journal:
                 journal.close()
-    return 0
+        if not server.started:  # e.g. the port is taken: a failure, so systemd retries
+            return 1
+    return exit_code
 
 
 if __name__ == "__main__":

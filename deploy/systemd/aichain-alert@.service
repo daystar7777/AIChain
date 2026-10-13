@@ -1,0 +1,22 @@
+# Telegram alert when an AIChain unit fails. Every unit points here with
+#   OnFailure=aichain-alert@%n.service
+# (a unit that systemd restarts passes through "failed" each time, so crash loops alert too;
+# aichain.alert sends at most one message per unit every 30 minutes). Reads TELEGRAM_BOT_TOKEN and
+# TELEGRAM_MANAGER_CHAT_ID from /opt/aichain/.env itself; the token is never logged or put on a
+# command line. Without them it only writes a line to the journal.
+[Unit]
+Description=AIChain failure alert for %i
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/aichain
+ExecStart=/opt/aichain/.venv/bin/python -m aichain.alert --unit %i --env-file /opt/aichain/.env --state /var/lib/aichain-alert/state.json
+StateDirectory=aichain-alert
+TimeoutStartSec=60
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+# Memory: one short Python process (systemctl/journalctl output, one HTTPS request).
+MemoryHigh=96M
+MemoryMax=128M

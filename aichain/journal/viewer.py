@@ -51,7 +51,10 @@ def create_app(db_path: Path, poll_seconds: float = 0.5, keepalive_seconds: floa
             conn.close()
 
     def entries_sql(node: str | None, kind: str | None) -> tuple[str, list[Any]]:
-        sql = "SELECT id, ts, height, node, kind, episode, data FROM entries WHERE run_id = ? AND id > ?"
+        # The timeline never shows LLM prompts (the episode view does): leaving them out keeps
+        # these responses, and the viewer's memory, small.
+        sql = ("SELECT id, ts, height, node, kind, episode, CASE WHEN kind = 'llm_call' "
+               "THEN json_remove(data, '$.messages') ELSE data END AS data FROM entries WHERE run_id = ? AND id > ?")
         args: list[Any] = []
         if node:
             sql += " AND node IN (%s)" % ",".join("?" * len(node.split(",")))
@@ -119,6 +122,15 @@ def create_app(db_path: Path, poll_seconds: float = 0.5, keepalive_seconds: floa
         if not rows:
             raise HTTPException(404, "episode not found")
         return rows
+
+    @app.get("/api/find")
+    def find(ref: Annotated[str, Query(pattern=r"^[A-Za-z0-9_.:@-]{3,80}$")],
+             limit: Annotated[int, Query(ge=1, le=500)] = 200) -> list[dict[str, Any]]:
+        """Entries of every run that mention an id (bounty, dispute, offer, loan, ...), newest first.
+        The live snapshot lists only open and recent items; older ones are found here. LLM calls
+        are skipped (their prompts are the bulk of the table and the tool entries carry the ids)."""
+        return query("SELECT id, run_id, ts, height, node, kind, episode, data FROM entries "
+                     "WHERE kind != 'llm_call' AND instr(data, ?) > 0 ORDER BY id DESC LIMIT ?", (ref, limit))
 
     @app.get("/api/knowledge")
     def knowledge(node: str | None = None, facts: Annotated[int, Query(ge=0, le=500)] = 50) -> dict[str, Any]:

@@ -1,18 +1,44 @@
 # The network itself: four Mastermind nodes behind the Bridge API (127.0.0.1:8780), researching
 # their interests every 3 hours and allowed to build tools (executed in isolated transient units).
 # LLM spend is capped per UTC day (50 calls per node, 200 total; persisted in data/llm_usage.json).
+#
+# Failures: a halted chain (log not writable) alerts through the manager outbox, then the process
+# exits with code 4 after --halt-exit-seconds (120) and systemd restarts it, which replays and
+# verifies the log. Every failure (also startup failures and watchdog kills) triggers
+# aichain-alert@ (Telegram). Restarts never stop: no start limit, the delay grows from 10 s to 15 min.
 [Unit]
 Description=AIChain network (Bridge API, research, tool workshop)
 After=network-online.target aichain-browser.service
 Wants=network-online.target aichain-browser.service
-StartLimitIntervalSec=600
-StartLimitBurst=5
+StartLimitIntervalSec=0
+OnFailure=aichain-alert@%n.service
 
 [Service]
+# Ready (READY=1) once the network loop runs; startup replays and verifies the whole chain log,
+# which can take minutes on a long chain.
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=30min
 WorkingDirectory=/opt/aichain
 ExecStart=/opt/aichain/.venv/bin/python -m aichain.bridge --provider opencode-go --research --research-minutes 180 --workshop --workshop-exec systemd --daily-calls-per-node 50 --daily-calls-total 200 --block-seconds 5 --host 127.0.0.1 --port 8780
 Restart=on-failure
-RestartSec=30
+RestartSec=10
+# Exponential backoff between restarts (systemd 254+, e.g. Ubuntu 24.04; older versions ignore
+# these two lines and keep RestartSec).
+RestartSteps=8
+RestartMaxDelaySec=15min
+# Watchdog: a thread pings every 40 s while the network loop shows progress (a loop turn, a log
+# entry or an LLM call) within --watchdog-stall-minutes (20; one LLM call with retries can take
+# minutes). No ping for 2 minutes -> SIGABRT (faulthandler writes every thread's stack to the
+# journal) -> failure -> alert and restart. No core files (the process is large).
+WatchdogSec=120
+LimitCORE=0
+TimeoutStopSec=60
+# Memory (sized for a small VPS, 4 GB and up): the four nodes, the board and the content store
+# usually take a few hundred MB. Above MemoryHigh the kernel reclaims hard and slows the process;
+# MemoryMax is the hard ceiling (OOM kill -> restart -> alert) so a leak cannot take the host down.
+MemoryHigh=1G
+MemoryMax=1536M
 
 [Install]
 WantedBy=multi-user.target

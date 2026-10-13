@@ -29,5 +29,6 @@
 - **키 교체**: 키가 유출됐다면 루트가 승인하는 `key_rotate(old → new)` 거래로 계정의 공개키를 바꾼다(계정 ID와 잔액·평판은 유지).
 
 ## 4. 백업 운영 권장
-- 매일 한 번 `aichain.backup create`를 서버 밖(다른 기기)으로 보관. 특히 `data/chain/keys/root.key`를 잃으면 체인을 이어갈 수 없다.
-- 백업 암호문의 passphrase는 서버에 두지 않는다.
+- 매일 자동 백업: `aichain-backup.timer`가 운영자의 공개키로 암호화해 `/opt/aichain/backups`에 최신 7개를 남긴다. 서버에는 공개키만 두므로 서버로는 백업을 열 수 없다. 설정과 복원은 [backups.md](backups.md).
+- 백업 파일은 서버 밖(다른 기기)으로도 옮겨 둔다. 특히 `data/chain/keys/root.key`를 잃으면 체인을 이어갈 수 없다.
+- 백업 암호문의 passphrase나 비밀키는 서버에 두지 않는다.

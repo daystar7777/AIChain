@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import sys
+import time
+from collections import deque
 from typing import Any, Callable, TextIO
 
 from aichain import audit
@@ -28,6 +30,11 @@ SECONDS_PER_BLOCK = 5
 
 
 class Network:
+    # In-memory history is for tests and the demo; the journal and the trace keep everything.
+    EVENTS_KEPT = 10_000
+    EPISODES_KEPT = 1_000
+    OUTBOX_KEPT = 500
+
     def __init__(self, gateway: LLMGateway, params: Params | None = None,
                  trace: TextIO | None = None, echo: bool = False,
                  web: SearchGateway | None = None, knowledge: KnowledgeStore | None = None,
@@ -38,7 +45,9 @@ class Network:
         self.chain = chain
         self.approvals = None  # ApprovalBook: outflows wait for the human manager
         self.audit_interval_blocks = audit.AUDIT_INTERVAL_BLOCKS
-        self.manager_outbox: list[dict[str, Any]] = []  # node -> manager messages (Telegram picks them up)
+        # node -> manager messages (Telegram picks them up by id, so ids grow across restarts)
+        self.manager_outbox: deque[dict[str, Any]] = deque(maxlen=self.OUTBOX_KEPT)
+        self._outbox_seq = 0
         self.workshop = workshop
         self.web = web
         self.knowledge = knowledge
@@ -69,10 +78,11 @@ class Network:
                 else getattr(self.board.accounts.get(name), "pubkey", None)))
             self.chain_stats = attach_chain(self.board, chain, self.keys)
             self.keys.check([ROOT_ACCOUNT, *self.board.accounts])
-        self.events: list[dict[str, Any]] = []
-        self.episodes: list[EpisodeResult] = []
+        self.events: deque[dict[str, Any]] = deque(maxlen=self.EVENTS_KEPT)
+        self.episodes: deque[EpisodeResult] = deque(maxlen=self.EPISODES_KEPT)
         self._trace = trace
         self._echo = echo
+        self.trace_errors = 0
         # Called with every log entry (the Bridge follows question lifecycles this way).
         self.listeners: list[Callable[[dict[str, Any]], None]] = []
         # Set by Node.run_episode so every entry logged during an episode carries its id.
@@ -89,10 +99,16 @@ class Network:
             entry["episode"] = self.current_episode
         self.events.append(entry)
         line = json.dumps(entry, ensure_ascii=False)
-        if self._trace:
-            self._trace.write(line + "\n")
-        if self._echo:
-            print(line, file=sys.stdout, flush=True)
+        try:
+            if self._trace:
+                self._trace.write(line + "\n")
+            if self._echo:
+                print(line, file=sys.stdout, flush=True)
+        except (OSError, ValueError) as e:  # disk full, closed file or pipe: the trace is optional
+            self.trace_errors += 1
+            if self.trace_errors <= 5 or self.trace_errors % 1000 == 0:
+                print(f"[aichain] trace write failed ({self.trace_errors}x): {type(e).__name__}: {e}",
+                      file=sys.stderr)
         for listener in self.listeners:
             try:
                 listener(entry)
@@ -419,7 +435,9 @@ class Network:
                                        "balance": self.board.account(node.id).balance_mP})
 
     def manager_send(self, node_id: str, text: str) -> dict[str, Any]:
-        item = {"id": len(self.manager_outbox) + 1, "node": node_id, "text": text[:2000],
+        # Millisecond clock, so a restarted process never reuses an id the Telegram bridge has seen.
+        self._outbox_seq = max(self._outbox_seq + 1, int(time.time() * 1000))
+        item = {"id": self._outbox_seq, "node": node_id, "text": text[:2000],
                 "height": self.board.height}
         self.manager_outbox.append(item)
         self.log(node_id, "manager_message", direction="to_manager", text=text[:500])

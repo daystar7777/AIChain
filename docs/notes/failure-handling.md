@@ -16,8 +16,9 @@
 | 같은 에피소드에서 도구 호출이 연속 3번 실패 | 에피소드 종료(`tool_errors`). 같은 실수를 반복하며 호출을 낭비하지 않게 |
 | 에피소드 코드 자체의 버그 | 그 에피소드만 `error`로 종료, `episode_error` 기록, 노드 상태 정리 |
 | 이벤트 폭주 | 남은 이벤트는 다음 주기에 처리(`busy` 기록), 예외 없음 |
-| 저널 기록 실패(디스크 가득 참 등) | 무시하고 계속, stderr에 경고(처음 5번, 이후 100번마다) |
-| **체인 로그 기록 실패** | **네트워크 정지**: 새 거래·블록·에피소드 중단, Bridge API는 503. 재시작하면 기록된 데까지 재생되어 일관된 상태로 복구 |
+| 저널 기록 실패(디스크 가득 참 등) | 무시하고 계속, stderr에 경고(처음 5번, 이후 100번마다). 뷰어용 스냅숏은 별도 스레드가 최대 5초마다 쓰고, 실패해도 다음 주기에 다시 쓴다 |
+| 추적 파일(trace JSONL)·Bridge 상태 저장 실패(디스크 가득 참) | 건너뛰고 계속(trace는 오류 횟수만 세고 stderr 경고, 상태 저장은 30초 뒤 재시도·`state_save_failed` 기록). 공간이 생기면 저절로 다시 쓴다 |
+| **체인 로그 기록 실패** | **네트워크 정지**: 새 거래·블록·에피소드 중단, Bridge API는 503. 관리인 outbox(텔레그램)로 알리고, 120초(`--halt-exit-seconds`) 뒤 종료 코드 4로 프로세스를 끝낸다 → systemd가 재시작하고 기록된 데까지 재생해 일관된 상태로 복구(원인이 남아 있으면 다시 멈추고 다시 알림) |
 | 체인 로그 변조·손상(state root 불일치) | 시작 거부, 원인과 복구 방법을 출력 |
 | 런타임 루프의 반복 오류 | 블록 스레드·에피소드 스레드 각각 오류마다 대기 시간을 늘림(0.5초→최대 60초), 성공하면 초기화 |
 | Policy Guard 연속 위반 10회, 또는 1시간 안에 잔액(사용 가능액, 시간 창 시작 시점 기준) 50% 넘게 내보내려는 시도 | 그 노드의 마스터마인드 **일시 정지**: LLM 호출 전부 중단(판정도 — 프로토콜 기본 규칙 AUTO_SPLIT에 맡김), 진행 중 에피소드 종료, 응답 없는 승인 건은 집행하지 않음. Core 의무(답변 공개, 하트비트)는 계속. 저널 `policy_paused`, 관리인 알림(텔레그램). 운영자가 `python -m aichain.admin unpause <node>`(또는 텔레그램 `/unpause`)로 풀면 밀린 판정 의무를 다시 올림. 정지 상태는 재시작 후에도 유지 |
@@ -28,4 +29,34 @@
 | Chromium 비정상 종료 | 다음 요청 때 자동 재시작 |
 | egress 프록시에 이상한 요청 | 400으로 거절, 프록시는 계속 |
 | SQLite 잠김 | 30초까지 대기 |
-| 서비스 프로세스 비정상 종료 | systemd가 재시작(10분에 5회 넘으면 멈추고 로그 확인 필요). 체인·기억·도구·사용량은 디스크에서 복구 |
+| 서비스 프로세스 비정상 종료·시작 실패 | systemd가 계속 재시작(시작 횟수 제한 없음, 간격은 10초에서 최대 15분까지 늘어남). 실패할 때마다 `aichain-alert@` 유닛이 텔레그램으로 알림(유닛당 30분에 한 번, 사이에 몇 번 더 실패했는지 함께). 체인·기억·도구·사용량은 디스크에서 복구 |
+| 네트워크 루프가 멈춤(교착, 끝나지 않는 호출) | systemd watchdog: 루프가 돌거나 로그·LLM 호출이 있는 동안만 40초마다 신호를 보낸다. 20분(`--watchdog-stall-minutes`) 동안 아무 진전이 없거나 프로세스 전체가 멈추면 2분 안에 SIGABRT → 모든 스레드의 스택이 저널(journalctl)에 남고 재시작·알림 |
+| 메모리 누수 | 유닛마다 `MemoryHigh`(회수 시작)·`MemoryMax`(넘으면 OOM 종료 → 재시작·알림) |
+
+## 오래 돌릴 때 (메모리·파일이 끝없이 늘지 않게)
+
+| 대상 | 한도 |
+|---|---|
+| `Network.events` / `episodes` (메모리) | 최근 10,000건 / 1,000건만 (전체는 저널과 trace에) |
+| 관리인 outbox | 최근 500건. id는 밀리초 시계 기반이라 재시작해도 줄지 않는다(텔레그램이 마지막 id를 기억하므로) |
+| LLM 게이트웨이 호출 기록 | 최근 1,000건 |
+| 웹 검색·페이지 캐시 | 검색 1시간·페이지 24시간 TTL, 전체 512개. 넘으면 만료된 것부터, 그다음 오래된 것부터 지운다 |
+| Bridge 질문 기록 | 끝난 지 30일 지난 것, 그리고 2,000건을 넘으면 오래된 끝난 것부터 |
+| trace JSONL | `data/bridge-YYYYMMDD.jsonl` 하루 한 파일(UTC), 재시작해도 이어 씀, 14일 지난 파일 삭제(`--trace-keep-days`). 예전 버전이 재시작마다 만든 `data/bridge-*.jsonl`도 같이 정리 |
+| 저널 스냅숏 | 열린 항목 + 종류별 최근 20건만. 이전 항목은 저널 기록(뷰어의 ID 찾기, `/api/find`)에 |
+| 저널 LLM 프롬프트 | 14일 지나면 원문 삭제(기존), 이제 쓰기 스레드에서 2,000건씩 나눠 처리 |
+
+## 서버에 반영하기 (systemd)
+
+```bash
+cd /opt/aichain
+install -m 644 deploy/systemd/aichain-*.service deploy/systemd/aichain-*.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl restart aichain-bridge aichain-journal aichain-telegram   # 브라우저·egress도 원하면 재시작
+systemctl status aichain-bridge     # "Status: block #…" 와 Watchdog 표시 확인
+systemctl start aichain-alert@test.service && journalctl -u aichain-alert@test.service -n 5   # 알림 경로 시험
+```
+
+- 알림은 `/opt/aichain/.env`의 `TELEGRAM_BOT_TOKEN`·`TELEGRAM_MANAGER_CHAT_ID`를 쓴다. 없으면 저널에 한 줄만 남긴다.
+- `RestartSteps`/`RestartMaxDelaySec`는 systemd 254 이상(Ubuntu 24.04)에서 동작한다. 그보다 오래된 systemd는 이 두 줄을 무시하고 고정 간격으로 재시작한다.
+- 브리지 첫 시작 때 저널에 시간 인덱스(`entries_ts`)를 한 번 만든다. 저널이 크면 시작이 몇십 초 늦어진다(시작 제한 시간 30분).

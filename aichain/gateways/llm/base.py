@@ -7,6 +7,7 @@ from __future__ import annotations
 import math
 import random
 import time
+from collections import deque
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -214,7 +215,7 @@ class LLMGateway:
         # Quota moved between nodes by rental deals today: (utc date, key) -> cap adjustment.
         self._adjust: dict[tuple[str, str], int] = {}
         self._load_usage()
-        self.log: list[dict[str, Any]] = []
+        self.log: deque[dict[str, Any]] = deque(maxlen=1000)  # recent calls; the journal keeps all
         # Called after every provider call: (request, response | None, info). The journal
         # uses this to record full prompts and responses.
         self.observers: list[Callable[[LLMRequest, LLMResponse | None, dict[str, Any]], None]] = []

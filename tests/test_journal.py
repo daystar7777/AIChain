@@ -208,3 +208,164 @@ def test_viewer_serves_reports(tmp_path):
     assert client.get("/reports/report-20261012-0010-24h.html").text == "<h1>r</h1>"
     for bad in ("../j.db", "x.html", "report-x.sh"):
         assert client.get(f"/reports/{bad}").status_code == 404
+
+
+def test_snapshot_lists_open_and_recent_items_only():
+    from aichain.journal.store import network_snapshot
+
+    net = build_network("scripted")
+    net.bridge_question("n1", "test", **DEFAULT_QUESTION)
+    net.run_until_idle()
+    snap = network_snapshot(net, recent=0)
+    assert [b["state"] for b in snap["bounties"]] == ["OPEN"]  # open ones always
+    assert snap["totals"]["bounties"] == 1 and "metrics" not in snap
+    p = SHORT_PARAMS
+    net.advance(p.commit_blocks + p.reveal_blocks + p.judge_blocks + p.dispute_blocks + 2)
+    snap = network_snapshot(net, recent=0)
+    assert snap["bounties"] == [] and snap["totals"]["bounties"] == 1  # closed: in the journal only
+    assert [b["state"] for b in network_snapshot(net, recent=1)["bounties"]] == ["FINAL"]
+
+
+def test_snapshot_is_written_by_the_writer_thread_at_most_every_interval(tmp_path):
+    import threading
+    import time
+
+    net = build_network("scripted")
+    journal = Journal(tmp_path / "j.db", snapshot_interval=3600)
+    journal.start_run("t")
+    writes, captures = [], []
+    real_write, real_capture = journal._write, journal._capture
+    journal._write = lambda *a: (writes.append(threading.current_thread().name), real_write(*a))
+    journal._capture = lambda force: (captures.append(force), real_capture(force))[1]
+    journal.attach(net)  # first snapshot inline
+    net.bridge_question("n1", "test", **DEFAULT_QUESTION)
+    net.run_until_idle()  # dozens of log entries within a fraction of the interval
+    assert captures == [True]
+    journal._last_snapshot -= 3600  # the interval has passed
+    net.advance(1)
+    journal.tick()
+    deadline = time.time() + 5
+    while len(writes) < 2 and time.time() < deadline:
+        time.sleep(0.01)
+    assert captures == [True, False] and writes[1] == "journal-writer"
+    journal._last_snapshot -= 3600
+    journal.tick()  # due, but nothing changed: no capture
+    assert len(captures) == 2
+    journal.close()
+    assert not any(t.name == "journal-writer" for t in threading.enumerate())
+    state = TestClient(create_app(tmp_path / "j.db")).get(f"/api/runs/{journal.run_id}/state").json()
+    assert state["height"] == net.board.height and state["bounties"][0]["state"] == "OPEN"
+
+
+def test_snapshot_writer_survives_a_full_disk(tmp_path, capsys):
+    import time
+
+    net = build_network("scripted")
+    journal = Journal(tmp_path / "j.db", snapshot_interval=0)
+    journal.start_run("t")
+    journal.attach(net)
+    real_write, calls = journal._write, []
+
+    def flaky(*a):
+        calls.append(1)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database or disk is full")
+        real_write(*a)
+
+    journal._write = flaky
+    for _ in range(2):
+        net.advance(1)
+        journal.tick()
+        deadline = time.time() + 5
+        while journal._pending is not None and time.time() < deadline:
+            time.sleep(0.01)
+    time.sleep(0.05)
+    journal.close()
+    assert journal.write_errors == 1 and len(calls) >= 2
+    assert "disk is full" in capsys.readouterr().err
+
+
+def test_prune_works_in_chunks_and_stops_at_young_entries(tmp_path):
+    import time
+
+    j = Journal(tmp_path / "j.db", keep_prompts_days=1)
+    j.PRUNE_CHUNK = 2
+    j.start_run("t")
+    for i in range(5):
+        j.record("llm_call", {"messages": [{"role": "user", "content": f"p{i}"}], "response": {"text": "ok"}})
+    j.record("tool", {"tool": "x"})
+    assert j.prune(now=time.time() + 2 * 86400) == 5
+    assert j.prune(now=time.time() + 2 * 86400) == 0  # resumes after the last pruned id
+    j.record("llm_call", {"messages": [{"role": "user", "content": "new"}]})
+    assert j.prune() == 0 and j._pruned_upto == 6  # the new entry is too young
+    rows = [json.loads(d) for (d,) in sqlite3.connect(tmp_path / "j.db").execute(
+        "SELECT data FROM entries WHERE kind = 'llm_call' ORDER BY id")]
+    assert all(r.get("messages_pruned") for r in rows[:5]) and rows[5]["messages"][0]["content"] == "new"
+
+
+def test_viewer_finds_older_items_by_id(tmp_path):
+    db = tmp_path / "j.db"
+    run, net = run_demo(db)
+    (bid,) = net.board.bounties
+    client = TestClient(create_app(db))
+    rows = client.get("/api/find", params={"ref": bid}).json()
+    assert rows and all(bid in json.dumps(r["data"], ensure_ascii=False) for r in rows)
+    assert {"bounty_settled", "bounty_final"} <= {r["kind"] for r in rows}
+    assert all(r["run_id"] == run and r["kind"] != "llm_call" for r in rows)
+    assert client.get("/api/find", params={"ref": "x' OR 1=1 --"}).status_code == 422
+
+
+def test_report_aggregates_match_a_full_read_and_respect_the_period(tmp_path):
+    import time
+    from collections import Counter
+
+    from aichain import report
+
+    db = tmp_path / "j.db"
+    run_demo(db)
+    conn = sqlite3.connect(db)
+    old = time.time() - 3 * 86400  # half of the entries are from three days ago
+    conn.execute("UPDATE entries SET ts = ? WHERE id <= (SELECT MAX(id) / 2 FROM entries)", (old,))
+    conn.execute("UPDATE metrics SET ts = ? WHERE rowid = 1", (old,))
+    conn.commit()
+    j = Journal(db)  # an extra entry: a web fetch, recent
+    j.start_run("t")
+    j.record("web_fetch", {"url": "https://example.org/a"})
+    j.record("llm_call", {"error": "HTTP 500"})
+    j.close()
+
+    def reference(since):  # what the old report computed from every row in memory
+        rows = [(k, n, json.loads(d)) for k, n, d in conn.execute(
+            "SELECT kind, node, data FROM entries WHERE ts >= ? ORDER BY id", (since,))]
+        llm = [d for k, _, d in rows if k == "llm_call"]
+        return (Counter(k for k, _, _ in rows),
+                sum((d.get("response") or {}).get("usage", {}).get("input_tokens", 0) for d in llm),
+                sum((d.get("response") or {}).get("usage", {}).get("output_tokens", 0) for d in llm),
+                sum(1 for d in llm if d.get("error")),
+                Counter((n, d.get("tool")) for k, n, d in rows if k == "tool"))
+
+    for since in (None, time.time() - 86400):
+        a = report.analyse(report.collect(db, tmp_path / "none.db", since))
+        by_kind, tin, tout, failed, tools = reference(since or 0)
+        assert a["by_kind"] == by_kind and a["tokens"] == (tin, tout) and tin > 0
+        assert a["failed_calls"] == failed == 1 and a["llm_calls"] == by_kind["llm_call"]
+        assert Counter({(n, t): c for n, ts in a["tools_used"].items() for t, c in ts.items()}) == tools
+        assert a["domains"] == Counter({"example.org": 1})
+    day = report.collect(db, tmp_path / "none.db", time.time() - 86400)
+    assert sum(day["by_kind"].values()) < sum(report.collect(db, tmp_path / "none.db", None)["by_kind"].values())
+    assert day["first"]["height"] > 0 and day["period"][0] >= time.time() - 86400
+    # The day's rows are found through the index, not by reading the whole table.
+    plan = " ".join(r[3] for r in conn.execute(
+        "EXPLAIN QUERY PLAN SELECT kind, COUNT(*) FROM entries WHERE ts >= ? GROUP BY kind", (0,)))
+    assert "entries_ts" in plan
+
+
+def test_timeline_api_leaves_out_llm_prompts(tmp_path):
+    db = tmp_path / "j.db"
+    run, _ = run_demo(db)
+    client = TestClient(create_app(db))
+    calls = client.get(f"/api/runs/{run}/entries", params={"kind": "llm_call"}).json()
+    assert calls and all("messages" not in c["data"] and c["data"]["response"] for c in calls)
+    ep = calls[0]["episode"]
+    steps = client.get(f"/api/runs/{run}/episodes/{ep}").json()
+    assert next(s for s in steps if s["kind"] == "llm_call")["data"]["messages"]  # the episode view keeps them

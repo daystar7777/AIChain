@@ -40,6 +40,7 @@ from aichain.sim.network import Network
 
 TERMINAL = {"settled", "no_bounty", "failed"}
 KEEP_SECONDS = 30 * 86400  # question records older than this (and finished) are dropped
+MAX_QUESTIONS = 2000  # and beyond this many, the oldest finished ones go first
 SAVE_EVERY_SECONDS = 30.0
 MAX_CATCH_UP = 720  # missed blocks produced in one go before the snapshot and inbox are served again
 HAND_OVER_SECONDS = 1.0  # how long a block waits for an idle episode thread to pick up new work
@@ -134,8 +135,18 @@ class NetworkRuntime:
         self.errors: list[str] = []
         self.state_path = state_path
         self._last_save = 0.0
+        # Called on the simulation thread every loop (e.g. the journal's snapshot timer).
+        self.tick_hooks: list[Any] = []
+        # Halted chain: after this many seconds call on_fatal(reason) (the server exits non-zero
+        # so systemd restarts it and replays the log). None: stay up, refusing work (tests).
+        self.halt_exit_seconds: float | None = None
+        self.on_fatal: Any = None
+        # time.monotonic() of the last sign of life: a loop turn, a log entry, an LLM call.
+        # The systemd watchdog pings only while this is recent (aichain.ops.Watchdog).
+        self.progress_at = 0.0
         self._load_state()
         net.listeners.append(self._on_log)
+        net.gateway.observers.append(lambda *_: self._beat())
         self._refresh_snapshot()
 
     # ---- persistence: Bridge question records and Policy Guard history survive restarts ----
@@ -164,8 +175,10 @@ class NetworkRuntime:
             return
         now = time.time()
         with self._lock:
-            for ref in [r for r, q in self._questions.items()
-                        if q.status in TERMINAL and now - q.created_at > KEEP_SECONDS]:
+            done = [r for r, q in self._questions.items() if q.status in TERMINAL]
+            excess = max(0, len(self._questions) - MAX_QUESTIONS)
+            for ref in done[:excess] + [r for r in done[excess:]
+                                        if now - self._questions[r].created_at > KEEP_SECONDS]:
                 q = self._questions.pop(ref)
                 if q.bounty_id:
                     self._by_bounty.pop(q.bounty_id, None)
@@ -185,6 +198,7 @@ class NetworkRuntime:
     def start(self) -> None:
         if self._threads:
             return
+        self.progress_at = 0.0  # "ready" (READY=1) waits for the block loop's first turn
         self.net.inline_episodes = False  # episodes run on their own thread
         self.net.gateway.call_guard = self._provider_wait
         if self.net.web is not None:
@@ -208,6 +222,9 @@ class NetworkRuntime:
         self.net.inline_episodes = True
         self.save_state()
 
+    def _beat(self) -> None:
+        self.progress_at = time.monotonic()
+
     @contextmanager
     def _provider_wait(self) -> Iterator[None]:
         """Gateways' call_guard: the episode thread lets go of the board while it waits on a
@@ -227,18 +244,28 @@ class NetworkRuntime:
     def _block_loop(self) -> None:
         next_block = time.monotonic() + self.block_seconds
         failures = 0
-        halt_reported = False
+        halted_at: float | None = None
         while not self._stop.is_set():
+            self._beat()
             if self.net.halted:
-                # Fail closed: stop producing blocks and running episodes; the API keeps answering.
+                # Fail closed: stop producing blocks and running episodes; the API keeps answering
+                # until the grace period ends, then the process exits and systemd restarts it.
+                exit_in = self.halt_exit_seconds
                 with self.board_lock:
-                    if not halt_reported:
-                        halt_reported = True
+                    if halted_at is None:
+                        halted_at = time.monotonic()
                         try:
-                            self.net.manager_send("core", f"⛔ 체인이 멈췄어요: {self.net.halted}")
+                            self.net.manager_send("core", f"⛔ 체인이 멈췄어요: {self.net.halted}" + (
+                                f"\n{exit_in:.0f}초 뒤 프로세스를 끝내고 systemd가 다시 시작합니다(체인 로그 재생)."
+                                if exit_in is not None else ""))
+                            self.net.log("runtime", "halted", reason=self.net.halted, exit_in=exit_in)
                         except Exception:
                             pass
                     self._refresh_snapshot()
+                if halted_at is not None and exit_in is not None \
+                        and time.monotonic() - halted_at >= exit_in and self.on_fatal:
+                    fatal, self.on_fatal = self.on_fatal, None  # once
+                    fatal(self.net.halted)
                 self._stop.wait(1.0)
                 continue
             try:
@@ -259,8 +286,14 @@ class NetworkRuntime:
                     if produced > 1:
                         self.net.log("runtime", "blocks_caught_up", blocks=produced)
                     self._refresh_snapshot()
+                    for hook in self.tick_hooks:
+                        hook()
                     if time.monotonic() - self._last_save >= SAVE_EVERY_SECONDS:
-                        self.save_state()
+                        try:
+                            self.save_state()
+                        except OSError as e:  # disk full: keep producing blocks, try again in 30 s
+                            self._last_save = time.monotonic()
+                            self.net.log("runtime", "state_save_failed", error=repr(e)[:300])
                 failures = 0
             except Exception as e:  # keep the network alive; surface the error, back off if it repeats
                 failures += 1
@@ -403,6 +436,7 @@ class NetworkRuntime:
         return {"outcome": str(b.outcome), "accepted_answer_id": b.accepted, "answers": answers}
 
     def _on_log(self, e: dict[str, Any]) -> None:
+        self._beat()
         kind = e["event"]
         with self._lock:
             ref = e.get("ref")
@@ -486,4 +520,6 @@ class NetworkRuntime:
             # Keep bounty views in records fresh (e.g. FINAL after the dispute window).
             for bid, ref in self._by_bounty.items():
                 rec = self._questions[ref]
+                if rec.bounty and rec.bounty["state"] in ("FINAL", "EXPIRED"):
+                    continue  # terminal: the view cannot change any more
                 rec.bounty = self._bounty_view(bid)

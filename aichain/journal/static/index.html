@@ -109,7 +109,7 @@ details > summary { cursor: pointer; }
   <div>
     <section><h2>지표</h2><div id="metrics"><div class="empty">데이터 없음</div></div></section>
     <section><h2>노드</h2><div id="nodes" class="nodes"><div class="empty">데이터 없음</div></div></section>
-    <section><h2>현상금 보드</h2><div id="bounties"><div class="empty">현상금 없음</div></div></section>
+    <section><h2>현상금 보드 <input id="findRef" size="18" placeholder="ID로 이전 기록 찾기 (b_…)"></h2><div id="bounties"><div class="empty">현상금 없음</div></div></section>
     <section><h2>분쟁 · 거버넌스 · 도구 시장</h2><div id="market"><div class="empty">없음</div></div></section>
     <section><h2>지식 <span id="kTabs" class="ktabs"></span></h2><div id="knowledge"><div class="empty">지식 노트 없음</div></div></section>
   </div>
@@ -328,7 +328,7 @@ function renderState(s) {
       <div class="recent">${esc(act)}</div></div>`;
   }).join("") || '<div class="empty">데이터 없음</div>';
   const bs = [...s.bounties].reverse();
-  $("bounties").innerHTML = bs.map(b => {
+  $("bounties").innerHTML = more(s, "bounties", bs.length) + bs.map(b => {
     const idx = stageIndex(b);
     const stages = STAGES.map((st, i) => {
       const label = st === "SETTLED" ? (OUTCOME[b.outcome] || "정산") : st;
@@ -350,6 +350,23 @@ function renderState(s) {
   }).join("") || '<div class="empty">현상금 없음</div>';
 }
 
+// The live snapshot lists open items and the newest closed ones; the rest stay in the journal.
+function more(s, key, shown) {
+  if (!s.totals || (key && !(s.totals[key] > shown))) return "";
+  return `<div class="meta">${key ? `전체 ${s.totals[key]}건 중 열린 것과 최근 것만 표시.` : "열린 것과 최근 것만 표시."} 이전 기록은 위의 ID 찾기로 볼 수 있어요.</div>`;
+}
+
+async function findRef(ref) {
+  const r = await fetch(`/api/find?ref=${encodeURIComponent(ref)}`);
+  $("dlgTitle").textContent = `기록 찾기 ${ref}`;
+  const rows = r.ok ? await r.json() : [];
+  $("dlgBody").innerHTML = rows.map(e => `<div class="step"><h3>${esc((KIND[e.kind] || [e.kind])[0])} #${e.id}
+    · 실행 #${e.run_id} · 블록 ${e.height ?? "-"} · ${esc(e.node || "")} · ${new Date(e.ts * 1000).toLocaleString("ko-KR", { hour12: false })}</h3>
+    ${describe(e)}<details><summary class="meta">원본</summary><pre>${esc(JSON.stringify(e.data, null, 1))}</pre></details></div>`).join("")
+    || `<div class="empty">${r.ok ? "기록 없음" : "ID 형식이 맞지 않아요"}</div>`;
+  $("dlg").showModal();
+}
+
 function renderMarket(s) {
   const ds = (s.disputes || []).slice().reverse().map(d => `<div class="answer ${d.state === "upheld" ? "accepted" : d.state === "rejected" ? "rejected" : ""}">
     <b>${esc(d.dispute_id)}</b> <span class="chip ${d.state === "open" ? "warn" : ""}">${esc(d.state)}</span>
@@ -366,7 +383,9 @@ function renderMarket(s) {
   const ps = (s.proposals || []).slice().reverse().map(x => `<div class="answer ${x.state === "ACTIVATED" ? "accepted" : ["REJECTED", "VETOED"].includes(x.state) ? "rejected" : ""}">
     <b>${esc(x.title)}</b> <span class="chip ${["VOTING", "TIMELOCK"].includes(x.state) ? "warn" : ""}">${esc(x.state)}</span> ${esc(x.kind)} · ${esc(x.proposer)}
     <div class="meta">${esc((x.changes || []).map(c => c.key + " " + c.from + " → " + c.to).join(", ") || "-")} · 투표 ${esc(Object.entries(x.votes || {}).map(([k, v]) => k + ":" + v).join(", ") || "없음")} · 마감 #${x.vote_until}</div></div>`).join("");
-  $("market").innerHTML = (ps ? `<div class="meta">제안</div>${ps}` : "") + (ds ? `<div class="meta">분쟁</div>${ds}` : "") + (of ? `<div class="meta">정보 판매</div>${of}` : "") + (sb ? `<div class="meta">구독</div>${sb}` : "") + (ln ? `<div class="meta">대출</div>${ln}` : "") + (rq ? `<div class="meta">도구 구매 요청</div>${rq}` : "") + (ts ? `<div class="meta">판매 중인 도구</div>${ts}` : "")
+  const cut = ["disputes", "proposals", "offers", "subscriptions", "loans", "tool_requests", "tools"]
+    .some(k => s.totals && s.totals[k] > (s[k] || []).length);
+  $("market").innerHTML = (cut ? more(s, null, 0) : "") + (ps ? `<div class="meta">제안</div>${ps}` : "") + (ds ? `<div class="meta">분쟁</div>${ds}` : "") + (of ? `<div class="meta">정보 판매</div>${of}` : "") + (sb ? `<div class="meta">구독</div>${sb}` : "") + (ln ? `<div class="meta">대출</div>${ln}` : "") + (rq ? `<div class="meta">도구 구매 요청</div>${rq}` : "") + (ts ? `<div class="meta">판매 중인 도구</div>${ts}` : "")
     || '<div class="empty">분쟁·도구 없음</div>';
 }
 
@@ -481,10 +500,10 @@ async function selectRun(id) {
   $("timeline").innerHTML = '<div class="empty">불러오는 중…</div>';
   let after = 0;
   for (;;) {
-    const batch = await (await fetch(`/api/runs/${id}/entries?after=${after}&limit=5000`)).json();
+    const batch = await (await fetch(`/api/runs/${id}/entries?after=${after}&limit=1000`)).json();
     batch.forEach(e => { entries.push(e); if (e.node && /^n\d+$/.test(e.node) && !nodeIds.includes(e.node)) nodeIds.push(e.node);
       if (["tool", "episode_end", "policy_reject", "board_reject"].includes(e.kind) && e.node) recent[e.node] = e; });
-    if (batch.length < 5000) break;
+    if (batch.length < 1000) break;
     after = batch[batch.length - 1].id;
   }
   renderNodeFilters(); renderTimeline(); loadState();
@@ -509,6 +528,7 @@ async function loadRuns() {
 $("run").onchange = () => selectRun(Number($("run").value));
 $("kindFilter").onchange = renderTimeline;
 $("dlgClose").onclick = () => $("dlg").close();
+$("findRef").onkeydown = ev => { if (ev.key === "Enter" && ev.target.value.trim()) findRef(ev.target.value.trim()); };
 (async () => {
   const runs = await loadRuns();
   if (runs.length) selectRun(runs[0].id); else $("timeline").innerHTML = '<div class="empty">기록된 실행이 없습니다</div>';

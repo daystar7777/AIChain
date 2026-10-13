@@ -4,6 +4,9 @@
 Description=AIChain egress proxy for the headless browser
 After=network-online.target
 Wants=network-online.target
+# Keep retrying (with growing delays) and alert on every failure (aichain-alert@).
+StartLimitIntervalSec=0
+OnFailure=aichain-alert@%n.service
 
 [Service]
 User=aichain-egress
@@ -13,6 +16,8 @@ RuntimeDirectoryMode=0750
 ExecStart=/opt/aichain/.venv/bin/python -m aichain.browser.egress --uds /run/aichain-egress/egress.sock --block 46.250.255.147
 Restart=on-failure
 RestartSec=3
+RestartSteps=6
+RestartMaxDelaySec=5min
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -25,6 +30,8 @@ InaccessiblePaths=/opt/aichain/.env /opt/aichain/data
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # Second layer under the guard. Loopback stays allowed for DNS (127.0.0.53); the guard blocks loopback targets.
 IPAddressDeny=10.0.0.0/8 100.64.0.0/10 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 fc00::/7 fe80::/10 46.250.255.147
+# Memory: a small asyncio proxy (tens of MB); the ceiling only stops a runaway.
+MemoryHigh=384M
 MemoryMax=512M
 TasksMax=256
 
