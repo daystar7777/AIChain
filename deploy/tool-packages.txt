@@ -1,0 +1,11 @@
+# Python packages tools may import inside the sandbox (05 doc 2.3; aichain/workshop/manifest.py
+# ALLOWED_PACKAGES). Installed for the system python3 into /opt/aichain-tool-packages by
+# deploy/scripts/install-tool-packages.sh. Additions go through a governance `policy` proposal.
+jsonschema==4.23.0
+numpy==2.1.3
+pandas==2.2.3
+sympy==1.13.3
+beautifulsoup4==4.12.3
+pyyaml==6.0.2
+python-dateutil==2.9.0.post0
+regex==2024.11.6

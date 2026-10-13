@@ -3,13 +3,14 @@
     /opt/aichain/.venv/bin/python deploy/scripts/executor-escape-tests.py
 
 Each case is code a malicious tool might run (static checks are bypassed on purpose: they
-are only a first filter). PASS means the isolation stopped it.
+are only a first filter). PASS means the isolation stopped it. Then every allowlisted package
+must import (installed once by deploy/scripts/install-tool-packages.sh).
 """
 
 import sys
 import time
 
-from aichain.workshop.executor import ExecutionFailed, SystemdExecutor
+from aichain.workshop.executor import TOOL_PACKAGES_DIR, ExecutionFailed, SystemdExecutor
 
 ATTACKS = {
     "network: public internet": "import socket\nsocket.create_connection(('1.1.1.1', 443), timeout=3)",
@@ -24,6 +25,8 @@ ATTACKS = {
     "read: /etc/shadow": "open('/etc/shadow').read()",
     "write: /etc": "open('/etc/aichain-escape','w').write('x')",
     "write: /opt": "open('/opt/aichain-escape','w').write('x')",
+    "write: tool packages": f"open('{TOOL_PACKAGES_DIR}/escape.py','w').write('x')",
+    "read: system dist-packages": "import os\nos.listdir('/usr/lib/python3/dist-packages')",
     "env: secrets in environment": "import os\nk=[x for x in os.environ if 'KEY' in x or 'TOKEN' in x]\nassert not k, k\nraise SystemExit('no secrets, but environment visible: '+','.join(sorted(os.environ)))",
     "proc: see other processes": "import os\nps=[p for p in os.listdir('/proc') if p.isdigit()]\nassert len(ps) <= 3, ps\nraise SystemExit('only own processes visible')",
     "fork bomb": "import os\nwhile True:\n    os.fork()",
@@ -34,6 +37,18 @@ ATTACKS = {
 }
 
 SANITY = "def run(input, ctx):\n    return {'sum': sum(input['xs'])}\n"
+
+# Allowlisted packages (import name -> a tiny use); each must work inside the sandbox.
+PACKAGES = {
+    "jsonschema": "jsonschema.validate({'a': 1}, {'type': 'object'})",
+    "numpy": "float(numpy.array([1.0, 2.0]).dot(numpy.array([3.0, 4.0])))",
+    "pandas": "int(pandas.DataFrame({'x': [1, 2, 3]})['x'].sum())",
+    "sympy": "str(sympy.simplify('x + x'))",
+    "bs4": "bs4.BeautifulSoup('<p>hi</p>', 'html.parser').get_text()",
+    "yaml": "yaml.safe_load('a: 1')",
+    "dateutil": "str(dateutil.parser.parse('2026-10-13').date())",
+    "regex": "regex.findall(r'\\p{L}+', 'ab 12 cd')",
+}
 
 
 def wrap(attack: str) -> str:
@@ -55,8 +70,19 @@ def main() -> int:
             failures += 1
         except ExecutionFailed as e:
             print(f"PASS  {name} ({time.monotonic() - started:.1f}s): {str(e)[:110]}")
-    print(f"\n{len(ATTACKS) - failures}/{len(ATTACKS)} blocked")
-    return 1 if failures else 0
+    print(f"\n{len(ATTACKS) - failures}/{len(ATTACKS)} blocked\n")
+    broken = 0
+    for name, use in PACKAGES.items():
+        extra = "\n    import dateutil.parser" if name == "dateutil" else ""
+        code = f"def run(input, ctx):\n    import {name}{extra}\n    return {{'out': repr({use})}}\n"
+        try:
+            res = ex.run(code, {}, 20, 256)
+            print(f"OK    package {name}: {res.output['out'][:60]} ({res.elapsed_ms} ms)")
+        except ExecutionFailed as e:
+            print(f"FAIL  package {name}: {str(e)[:110]}")
+            broken += 1
+    print(f"\n{len(PACKAGES) - broken}/{len(PACKAGES)} allowlisted packages usable")
+    return 1 if failures or broken else 0
 
 
 if __name__ == "__main__":

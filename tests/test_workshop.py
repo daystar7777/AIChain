@@ -172,3 +172,64 @@ def test_systemd_executor_command_is_locked_down():
     if not sys.platform.startswith("linux") or os.geteuid() != 0:
         with pytest.raises(ExecutionDisabled):
             SystemdExecutor()
+
+
+def test_tool_package_list_matches_the_allowlist():
+    from pathlib import Path
+
+    from aichain.workshop.manifest import ALLOWED_PACKAGES
+
+    path = Path(__file__).resolve().parents[1] / "deploy" / "tool-packages.txt"
+    lines = [x.strip() for x in path.read_text().splitlines() if x.strip() and not x.startswith("#")]
+    assert all("==" in x for x in lines)  # pinned
+    assert {x.split("==")[0].lower() for x in lines} == ALLOWED_PACKAGES
+
+
+def test_sandbox_runner_sees_only_the_packages_dir(tmp_path):
+    # The runner itself (no tool isolation needed: the code here is the test's own).
+    import subprocess
+
+    from aichain.workshop.executor import _RUNNER
+
+    pkg = tmp_path / "pkgs" / "fakepkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("VALUE = 7\n")
+    code = ("def run(input, ctx):\n    import fakepkg, os\n    try:\n        import pydantic\n"
+            "        hidden = False\n    except ImportError:\n        hidden = True\n"
+            "    return {'value': fakepkg.VALUE, 'site_hidden': hidden,\n"
+            "            'blas': os.environ.get('OPENBLAS_NUM_THREADS')}\n")
+    req = {"code": code, "input": {}, "timeout_s": 10, "memory_mb": 256, "tool_id": "t",
+           "sys_path": [str(tmp_path / "pkgs")]}
+    proc = subprocess.run([sys.executable, "-I", "-S", "-c", _RUNNER], input=json.dumps(req), text=True,
+                          capture_output=True, timeout=30, cwd="/")
+    assert json.loads(proc.stdout)["ok"] == {"value": 7, "site_hidden": True, "blas": "1"}, proc.stderr
+    del req["sys_path"]  # without the packages dir nothing beyond the stdlib is importable
+    proc = subprocess.run([sys.executable, "-I", "-S", "-c", _RUNNER], input=json.dumps(req), text=True,
+                          capture_output=True, timeout=30, cwd="/")
+    assert proc.returncode != 0 and "No module named 'fakepkg'" in proc.stderr
+
+
+def test_systemd_executor_passes_packages_dir_and_memory_headroom(monkeypatch, tmp_path):
+    import subprocess
+
+    from aichain.workshop import executor as ex_mod
+
+    ex = ex_mod.SystemdExecutor.__new__(ex_mod.SystemdExecutor)
+    ex.python, ex.systemd_run, ex.packages_dir = "/usr/bin/python3", "/usr/bin/systemd-run", str(tmp_path / "none")
+    seen = {}
+
+    def fake_run(cmd, input, **kw):
+        seen["req"] = json.loads(input)
+        if "numpy" in seen["req"]["code"]:
+            return subprocess.CompletedProcess(cmd, 1, "", "ModuleNotFoundError: No module named 'numpy'")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"ok": {"x": 1}}), "")
+
+    monkeypatch.setattr(ex_mod.subprocess, "run", fake_run)
+    assert ex.run("def run(input, ctx):\n    return {'x': 1}\n", {}, 5, 128).output == {"x": 1}
+    assert seen["req"]["sys_path"] == [str(tmp_path / "none")]
+    assert seen["req"]["memory_mb"] == 128
+    assert seen["req"]["address_space_mb"] == 128 + ex_mod.ADDRESS_SPACE_HEADROOM_MB
+    with pytest.raises(ex_mod.ExecutionFailed, match="not installed on this server"):
+        ex.run("import numpy\ndef run(input, ctx):\n    return {}\n", {}, 5, 128)
+    # The system's own Python packages are not reachable from the unit.
+    assert any("/usr/lib/python3/dist-packages" in p for p in ex_mod.SYSTEMD_PROPERTIES)

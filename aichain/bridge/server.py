@@ -334,6 +334,24 @@ def create_app(runtime: NetworkRuntime, tokens: TokenStore, *, start_runtime: bo
             return {"queued": True}
         return runtime.call(fn)
 
+    class UnpauseIn(BaseModel):
+        note: str = Field(default="", max_length=500)
+
+    @app.post("/admin/v1/nodes/{node_id}/unpause", dependencies=[Depends(operator)])
+    def unpause_node(node_id: str, body: UnpauseIn) -> dict[str, Any]:
+        """Lift a Policy Guard pause (04 doc 3.4) after the operator has looked at why it happened."""
+        def fn(net: Any) -> dict[str, Any]:
+            node = net.nodes.get(node_id)
+            if node is None:
+                raise HTTPException(404, f"no node {node_id}")
+            if not node.policy.paused:
+                raise HTTPException(409, f"{node_id} is not paused")
+            reason = node.policy.pause_reason
+            node.unpause(body.note)
+            runtime.save_state()  # Policy Guard state is persisted; do not wait for the next save
+            return {"node": node_id, "paused": False, "was": reason}
+        return runtime.call(fn)
+
     class TickIn(BaseModel):
         kind: Literal["economy_tick", "research_tick", "reflect"]
 

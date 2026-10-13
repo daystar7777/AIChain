@@ -8,6 +8,11 @@ real isolation boundary (see docs/notes/tool-execution-isolation.md); none ships
 unless AICHAIN_UNSAFE_LOCAL_EXEC=1. It is *not* a security boundary: it runs the code
 in a separate `python -I` process with a timeout and (where the OS allows) memory/CPU
 rlimits, but it does not cut the network or the file system.
+
+Allowlisted packages (manifest.ALLOWED_PACKAGES, 05 doc 2.3) reach `SystemdExecutor` tools from
+one root-owned directory, TOOL_PACKAGES_DIR, installed once by
+deploy/scripts/install-tool-packages.sh. The sandbox runs `python3 -I -S`, so the system's
+site/dist-packages stay off sys.path; the runner appends only that directory, after the stdlib.
 """
 
 from __future__ import annotations
@@ -49,8 +54,15 @@ class DisabledExecutor:
             "tool execution is disabled on this deployment; the operator must enable an isolated executor")
 
 
+# Root-owned, read-only inside the unit (ProtectSystem=strict); see install-tool-packages.sh.
+TOOL_PACKAGES_DIR = "/opt/aichain-tool-packages"
+# numpy/pandas reserve far more address space (BLAS buffers, malloc arenas, mapped .so files)
+# than they touch. Inside a systemd unit the cgroup's MemoryMax is the real memory cap, so
+# RLIMIT_AS there only stops runaway reservations and gets this headroom on top.
+ADDRESS_SPACE_HEADROOM_MB = 1024
+
 _RUNNER = textwrap.dedent("""
-    import json, sys
+    import json, os, sys
     def _limit(mem_mb, cpu_s):
         try:
             import resource
@@ -61,7 +73,11 @@ _RUNNER = textwrap.dedent("""
         except Exception:
             pass
     req = json.loads(sys.stdin.read())
-    _limit(req["memory_mb"], req["timeout_s"])
+    _limit(req.get("address_space_mb", req["memory_mb"]), req["timeout_s"])
+    # Allowlisted packages: only the directories Core names, after the stdlib (cannot shadow it).
+    sys.path.extend(req.get("sys_path", []))
+    for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ[_var] = "1"  # one CPU; BLAS thread pools would also run into TasksMax
     scope = {"__name__": "aichain_tool"}
     exec(compile(req["code"], "<tool>", "exec"), scope)
     class Ctx:
@@ -142,19 +158,23 @@ SYSTEMD_PROPERTIES = [
     "MemorySwapMax=0",
     "InaccessiblePaths=-/opt/aichain -/opt/aichain-browser -/root -/home -/var/lib/aichain-browser "
     "-/run/aichain-egress -/run/aichain-browser -/etc/ssh",
+    # Only TOOL_PACKAGES_DIR provides packages; the system's own Python packages stay out of reach.
+    "InaccessiblePaths=-/usr/lib/python3/dist-packages -/usr/local/lib/python3.12/dist-packages",
 ]
 
 
 class SystemdExecutor:
     name = "systemd-transient"
 
-    def __init__(self, python: str = "/usr/bin/python3", systemd_run: str = "/usr/bin/systemd-run") -> None:
+    def __init__(self, python: str = "/usr/bin/python3", systemd_run: str = "/usr/bin/systemd-run",
+                 packages_dir: str = TOOL_PACKAGES_DIR) -> None:
         if not sys.platform.startswith("linux") or os.geteuid() != 0:
             raise ExecutionDisabled("SystemdExecutor needs Linux and root (it creates transient units)")
         if not os.path.exists(systemd_run):
             raise ExecutionDisabled(f"{systemd_run} not found")
         self.python = python
         self.systemd_run = systemd_run
+        self.packages_dir = packages_dir
 
     def command(self, timeout_s: int, memory_mb: int) -> list[str]:
         props = SYSTEMD_PROPERTIES + [f"MemoryMax={memory_mb}M", f"RuntimeMaxSec={timeout_s}"]
@@ -169,7 +189,9 @@ class SystemdExecutor:
 
         started = time.monotonic()
         req = json.dumps({"code": code, "input": input, "timeout_s": timeout_s,
-                          "memory_mb": memory_mb, "tool_id": tool_id})
+                          "memory_mb": memory_mb, "tool_id": tool_id,
+                          "address_space_mb": memory_mb + ADDRESS_SPACE_HEADROOM_MB,
+                          "sys_path": [self.packages_dir]})
         try:
             proc = subprocess.run(self.command(timeout_s, memory_mb), input=req, text=True,
                                   capture_output=True, timeout=timeout_s + 10)
@@ -177,7 +199,10 @@ class SystemdExecutor:
             raise ExecutionFailed(f"timed out after {timeout_s}s") from e
         if proc.returncode != 0:
             err = (proc.stderr or "").strip().splitlines()
-            raise ExecutionFailed(err[-1][:300] if err else f"exit code {proc.returncode}")
+            msg = err[-1][:300] if err else f"exit code {proc.returncode}"
+            if "ModuleNotFoundError" in msg and not os.path.isdir(self.packages_dir):
+                msg += " (the allowlisted packages are not installed on this server yet)"
+            raise ExecutionFailed(msg)
         try:
             out = json.loads(proc.stdout)["ok"]
         except (ValueError, KeyError) as e:

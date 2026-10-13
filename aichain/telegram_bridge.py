@@ -27,6 +27,7 @@ HELP = """AIChain 관리인 명령
 /disputes — 열린 분쟁 · /resolve <id> uphold|reject|void [메모]
 /proposals — 열린 제안 · /vote <id> yes|no|abstain <이유>
 /ask <노드> <메시지> — 노드에게 말하기 (예: /ask n2 오늘 뭐 배웠어?)
+/unpause <노드> [메모] — Policy Guard 일시 정지 해제
 /report — 리포트 링크"""
 
 
@@ -86,6 +87,7 @@ class TelegramBridge:
         if cmd == "/status":
             s = self._get("/admin/v1/status")
             nodes = "\n".join(f"- {n['id']} {n['persona']}: {n['balance']} (평판 {n['reputation']}, 예산 {n['budget_state']})"
+                              + (f" ⛔ 일시 정지 (/unpause {n['id']})" if n.get("paused") else "")
                               for n in s.get("nodes", []))
             usage = s.get("daily_usage", {}).get("*", 0)
             return f"블록 #{s['height']} · 오늘 LLM {usage}회 · 열린 현상금 {s['open_bounties']}\n{nodes}" + (
@@ -118,6 +120,11 @@ class TelegramBridge:
                 return "사용법: /ask n2 메시지"
             code, body = self._post(f"/admin/v1/nodes/{arg1}/message", {"text": rest})
             return f"{arg1}에게 전달했습니다. 답이 오면 알려드립니다." if code == 200 else f"실패 {code}: {body}"
+        if cmd == "/unpause":
+            if not arg1:
+                return "사용법: /unpause n2 [메모]"
+            code, body = self._post(f"/admin/v1/nodes/{arg1}/unpause", {"note": rest})
+            return f"{arg1} 일시 정지 해제 (사유였던 것: {body.get('was')})" if code == 200 else f"실패 {code}: {body}"
         if cmd == "/report":
             return f"{self.viewer_url}/reports"
         return "모르는 명령입니다. /help"

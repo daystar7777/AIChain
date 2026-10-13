@@ -30,7 +30,9 @@ class ToolManifest(BaseModel):
     output_schema: dict[str, Any] = Field(description="출력 JSON Schema (type: object)")
     permissions: Permissions = Field(default_factory=Permissions)
     limits: Limits = Field(default_factory=Limits)
-    python_packages: list[str] = Field(default_factory=list, max_length=5)
+    python_packages: list[str] = Field(
+        default_factory=list, max_length=5,
+        description=f"import하는 허용 패키지 (선택): {', '.join(sorted(ALLOWED_PACKAGES))}")
 
     @field_validator("name")
     @classmethod

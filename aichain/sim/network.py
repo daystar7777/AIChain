@@ -231,6 +231,13 @@ class Network:
                     and self.gateway.has_daily_room(node.id):
                 node.enqueue("tool_request_new", {"request_id": request_id})
 
+    def announce_tool(self, tool_id: str, version: int) -> None:
+        """Published code is public (05 doc 4.1, 4.3): reviewers (Warden) get to read each new tool."""
+        listing = self.board.tools[(tool_id, version)]
+        for node in self.nodes.values():
+            if node.cfg.watch_settlements and node.id != listing.author and self.gateway.has_daily_room(node.id):
+                node.enqueue("tool_published", {"tool_id": tool_id, "version": version})
+
     def verify_tool_submission(self, request_id: str, tool_id: str, version: int) -> Any:
         """Core runs the buyer's acceptance tests on the submitted version in the isolated
         executor; root records the result on chain (objective, no LLM judgement)."""
@@ -381,6 +388,17 @@ class Network:
         self.log(node_id, "manager_message", direction="to_manager", text=text[:500])
         return item
 
+    def send_peer_message(self, sender: str, to: str, text: str) -> tuple[str, bool]:
+        """send_msg (04 doc 3.3): free text between nodes, no chain write and no points. Journaled
+        here; the recipient gets a peer_msg event with the text as <data source="peer:<sender>">."""
+        msg_id = "msg_" + sha256_hex(f"{sender}|{to}|{self.board.height}|{len(self.events)}|{text}")[:12]
+        node = self.nodes[to]
+        queued = self.gateway.has_daily_room(to) and not node.policy.paused
+        self.log(sender, "peer_msg", msg_id=msg_id, to=to, text=text, queued=queued)
+        if queued:
+            node.enqueue("peer_msg", {"msg_id": msg_id, "from": sender, "text": text})
+        return msg_id, queued
+
     def manager_receive(self, node_id: str, text: str, sender: str = "manager") -> None:
         node = self.nodes.get(node_id)
         if node is None:
@@ -396,7 +414,14 @@ class Network:
             node = self.nodes.get(a.node)
             if node is None:
                 continue
-            result = node.execute_approval(a.args, a.tool)
+            if node.policy.paused and a.decided_by == "timeout":
+                from aichain.common import data_block
+
+                # Nobody approved it and the node is paused for review: do not move its points.
+                result = data_block("core", "거부(Policy Guard): 노드가 일시 정지 상태라 응답 없는 승인 건을 "
+                                            "집행하지 않는다")
+            else:
+                result = node.execute_approval(a.args, a.tool)
             ok = not any(result.startswith(f'<data source="core">\n{p}')
                          for p in ("오류", "거부", "웹 오류", "내부 오류", "관리인 승인 대기"))
             self.approvals.finish(a, ok, result)
