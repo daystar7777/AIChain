@@ -413,7 +413,7 @@ def test_research_may_post_small_questions_a_few_times_a_day(tmp_path):
     assert sum("bounty_id=" in a for a in asked) == 2 and "2/day" in asked[3]
     mine = [b for b in net.board.bounties.values() if b.asker == "n2"]
     assert len(mine) == 2 and all(b.reward_mP == 3000 for b in mine)
-    assert net.nodes["n2"].policy.dump()["research_asks"]
+    assert net.nodes["n2"].policy.dump()["self_asks"]
     net.advance(17_281)
     net.research(["n2"])
     net.run_until_idle()
