@@ -26,6 +26,7 @@ from aichain.sim.network import Network
 
 TERMINAL = {"settled", "no_bounty", "failed"}
 KEEP_SECONDS = 30 * 86400  # question records older than this (and finished) are dropped
+MAX_QUESTIONS = 2000  # and beyond this many, the oldest finished ones go first
 SAVE_EVERY_SECONDS = 30.0
 
 
@@ -110,8 +111,10 @@ class NetworkRuntime:
             return
         now = time.time()
         with self._lock:
-            for ref in [r for r, q in self._questions.items()
-                        if q.status in TERMINAL and now - q.created_at > KEEP_SECONDS]:
+            done = [r for r, q in self._questions.items() if q.status in TERMINAL]
+            excess = max(0, len(self._questions) - MAX_QUESTIONS)
+            for ref in done[:excess] + [r for r in done[excess:]
+                                        if now - self._questions[r].created_at > KEEP_SECONDS]:
                 q = self._questions.pop(ref)
                 if q.bounty_id:
                     self._by_bounty.pop(q.bounty_id, None)
@@ -167,7 +170,11 @@ class NetworkRuntime:
                 for hook in self.tick_hooks:
                     hook()
                 if time.monotonic() - self._last_save >= SAVE_EVERY_SECONDS:
-                    self.save_state()
+                    try:
+                        self.save_state()
+                    except OSError as e:  # disk full: keep producing blocks, try again in 30 s
+                        self._last_save = time.monotonic()
+                        self.net.log("runtime", "state_save_failed", error=repr(e)[:300])
                 failures = 0
             except Exception as e:  # keep the network alive; surface the error, back off if it repeats
                 failures += 1
@@ -345,4 +352,6 @@ class NetworkRuntime:
             # Keep bounty views in records fresh (e.g. FINAL after the dispute window).
             for bid, ref in self._by_bounty.items():
                 rec = self._questions[ref]
+                if rec.bounty and rec.bounty["state"] in ("FINAL", "EXPIRED"):
+                    continue  # terminal: the view cannot change any more
                 rec.bounty = self._bounty_view(bid)

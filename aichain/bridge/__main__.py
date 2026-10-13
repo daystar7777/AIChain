@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import sys
-import time
 from pathlib import Path
 
 import uvicorn
@@ -25,6 +24,7 @@ from aichain import setup as node_setup
 from aichain.journal.store import Journal
 from aichain.memory import KnowledgeStore
 from aichain.chain.store import ChainStore, ReplayMismatch
+from aichain.ops import DailyTrace
 from aichain.sim.demo import make_workshop
 from aichain.sim.factory import (
     ROOT,
@@ -68,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="keep traded information bodies in the journal (development; turn off later)")
     ap.add_argument("--journal-keep-prompts-days", type=float, default=14.0,
                     help="drop LLM prompt text from journal entries older than this (0 keeps forever)")
+    ap.add_argument("--trace-keep-days", type=float, default=14.0,
+                    help="JSONL trace: one file per UTC day in data/, older files are deleted")
     ap.add_argument("--research", action="store_true",
                     help="let idle nodes research their interests on the web (off by default)")
     ap.add_argument("--research-minutes", type=float, default=30.0)
@@ -100,10 +102,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no clients in {args.tokens}; create one with: python -m aichain.bridge.tokens new <client>",
               file=sys.stderr)
         return 2
-    trace_path = ROOT / "data" / f"bridge-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
-    trace_path.parent.mkdir(parents=True, exist_ok=True)
     params = SHORT_PARAMS if args.periods == "short" else Params()
-    with trace_path.open("w", encoding="utf-8", buffering=1) as trace:
+    # Also expires the per-restart trace files older versions left in data/ (same name prefix).
+    with DailyTrace(ROOT / "data", "bridge", keep_days=args.trace_keep_days) as trace:
         try:
             interval = (max(1, round(args.research_minutes * 60 / args.block_seconds))
                         if args.research else None)
@@ -148,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
                                  state_path=ROOT / "data" / "bridge_state.json")
         if journal:
             runtime.tick_hooks.append(journal.tick)
-        print(f"trace: {trace_path}", file=sys.stderr)
+        print(f"trace: {trace.path} (one file per UTC day, kept {args.trace_keep_days:g} days)", file=sys.stderr)
         print(f"chain replayed: {net.chain_stats}", file=sys.stderr)
         if journal:
             net.log("core", "chain_replayed", **(net.chain_stats or {}))
