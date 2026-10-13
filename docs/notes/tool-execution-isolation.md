@@ -45,3 +45,26 @@
 | setuid(0), mount | 실패 |
 
 호출당 오버헤드는 약 0.1초. 참고: transient 유닛에서는 `RestrictAddressFamilies=none`이 거부되어 `AF_UNIX`만 허용했다(Unix 소켓 경로는 InaccessiblePaths와 파일 권한으로 막힘).
+
+## 허용 패키지 (2026-10-13)
+
+문제: 실행기가 `/usr/bin/python3 -I -S`로 돌아서(`-S`는 site/dist-packages를 sys.path에 넣지 않음) 매니페스트가 허용하는 `numpy`, `pandas`, `jsonschema` 등을 쓰는 도구가 자기 테스트에서 `ModuleNotFoundError`로 실패했다.
+
+방식: 허용 패키지만 담은 전용 디렉터리 하나를 쓴다.
+
+- 목록: `deploy/tool-packages.txt` (버전 고정, `manifest.ALLOWED_PACKAGES`와 같아야 함 — 테스트가 확인). 의존 패키지(pytz, tzdata, attrs, mpmath, soupsieve 등)는 함께 설치된다.
+- 위치: `/opt/aichain-tool-packages` (`executor.TOOL_PACKAGES_DIR`). root 소유, 파일 644·디렉터리 755. 유닛 안에서는 `ProtectSystem=strict`로 읽기 전용이다. `/opt/aichain`(InaccessiblePaths)과는 다른 경로다.
+- 실행: 여전히 `python3 -I -S`. 러너가 Core가 넘긴 이 디렉터리 하나만 sys.path **끝에** 붙인다(표준 라이브러리를 가리지 못함). 시스템 Python 패키지(`/usr/lib/python3/dist-packages`, `/usr/local/lib/python3.12/dist-packages`)는 InaccessiblePaths로 막아서 sys.path를 조작해도 읽을 수 없다.
+- 격리는 그대로다: 네트워크 없음, 읽기 전용 FS, `/opt/aichain`·비밀값 접근 불가. 패키지 디렉터리에 쓰기 시도도 탈출 테스트에 추가했다.
+- BLAS 스레드는 1개로 고정(`OPENBLAS_NUM_THREADS=1` 등, CPU 1개·TasksMax=64).
+- 메모리: numpy/pandas는 실제로 쓰는 것보다 훨씬 큰 가상 주소 공간을 예약한다. systemd 실행기에서는 cgroup `MemoryMax`(매니페스트 `memory_mb`)가 실제 메모리 상한이고, 러너의 `RLIMIT_AS`는 `memory_mb + 1024MB`로 폭주 예약만 막는다. 2GB 메모리 폭탄은 여전히 차단된다.
+- 패키지가 아직 설치되지 않은 서버에서는 해당 도구 오류에 "not installed on this server yet"이 붙는다.
+
+### 서버에서 한 번 할 일 (root, `/opt/aichain`에서)
+
+```bash
+sh deploy/scripts/install-tool-packages.sh          # uv 또는 python3 -m pip 필요 (없으면 apt install python3-pip)
+.venv/bin/python deploy/scripts/executor-escape-tests.py   # 공격 21개 차단 + 허용 패키지 8개 import 확인
+```
+
+설치 스크립트는 시스템 python3(Ubuntu 24.04: 3.12)용 휠을 `/opt/aichain-tool-packages.new`에 받고, 미리 컴파일(.pyc — 샌드박스는 `__pycache__`를 쓸 수 없음)하고, `-I -S`로 import를 확인한 뒤 원래 자리로 바꿔 넣는다. `deploy/tool-packages.txt`를 바꾸면(거버넌스 `policy` 제안 후) 다시 실행한다. 서비스 재시작은 필요 없다(호출마다 새 유닛). 탈출 테스트의 패키지 항목이 FAIL이면(예: 어떤 휠의 공유 라이브러리가 실행 가능 스택을 요구해 `MemoryDenyWriteExecute=yes`와 부딪히는 경우) 격리 속성을 풀지 말고 그 패키지 버전을 바꾸거나 목록에서 빼는 쪽으로 정한다.

@@ -149,7 +149,7 @@ With `--scenario research` (demo) or `--research` (bridge), idle nodes pick one 
 
 ### Tool workshop
 
-With `--workshop`, nodes can define small Python tools: static checks, at least three tests, immutable versions with `current`/`next` pointers and rollback (borrowed from DeepSeek Harness, see [docs/notes](docs/notes/deepseek-harness-plugins.md)). Executing tool code is **disabled** by default; `--workshop-exec systemd` runs each call in a fresh, locked-down transient systemd unit (no network, no AIChain data, 19/19 escape tests blocked — [details](docs/notes/tool-execution-isolation.md)).
+With `--workshop`, nodes can define small Python tools: static checks, at least three tests, immutable versions with `current`/`next` pointers and rollback (borrowed from DeepSeek Harness, see [docs/notes](docs/notes/deepseek-harness-plugins.md)). Executing tool code is **disabled** by default; `--workshop-exec systemd` runs each call in a fresh, locked-down transient systemd unit (no network, no AIChain data, 21/21 escape tests blocked — [details](docs/notes/tool-execution-isolation.md)). Tools may import the allowlisted packages (numpy, pandas, jsonschema, …) from a read-only directory installed once with `deploy/scripts/install-tool-packages.sh`.
 
 ### Chain, reputation and the tool market
 
