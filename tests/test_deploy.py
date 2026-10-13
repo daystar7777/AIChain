@@ -40,7 +40,8 @@ def test_services_keep_retrying_and_alert_on_failure():
         assert s["StartLimitIntervalSec"] == ["0"] and "StartLimitBurst" not in s, name
         assert s["OnFailure"] == ["aichain-alert@%n.service"], name
         assert s["Restart"] == ["on-failure"] and "RestartMaxDelaySec" in s, name
-    assert settings(UNITS / "aichain-report.service")["OnFailure"] == ["aichain-alert@%n.service"]
+    for oneshot in ("aichain-report.service", "aichain-backup.service"):
+        assert settings(UNITS / oneshot)["OnFailure"] == ["aichain-alert@%n.service"]
     alert = settings(UNITS / "aichain-alert@.service")
     assert "OnFailure" not in alert and "%i" in alert["ExecStart"][0]  # no alert loops
     assert "TELEGRAM" not in "".join(alert["ExecStart"])  # the token is read from the file, not argv
@@ -50,3 +51,12 @@ def test_bridge_unit_uses_notify_and_the_watchdog():
     s = settings(UNITS / "aichain-bridge.service")
     assert s["Type"] == ["notify"] and int(s["WatchdogSec"][0]) >= 60
     assert s["TimeoutStartSec"] == ["30min"]  # replaying a long chain log before READY=1
+
+
+def test_backup_timer_runs_daily_with_the_public_key_only():
+    timer = settings(UNITS / "aichain-backup.timer")
+    assert timer["OnCalendar"] and timer["Persistent"] == ["true"]
+    s = settings(UNITS / "aichain-backup.service")
+    cmd = s["ExecStart"][0]
+    assert "aichain.backup auto" in cmd and "--keep 7" in cmd and "/opt/aichain/backups" in cmd
+    assert "PASSPHRASE" not in (UNITS / "aichain-backup.service").read_text()

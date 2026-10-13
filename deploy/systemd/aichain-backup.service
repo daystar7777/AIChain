@@ -1,0 +1,26 @@
+# Daily encrypted backup to the operator's public key (docs/notes/backups.md). The server holds
+# only the public key (AICHAIN_BACKUP_PUBKEY in /opt/aichain/.env), so nothing on it can decrypt
+# the backups. Without the key the run logs one line and succeeds. Keeps the newest 7 in
+# /opt/aichain/backups; the journal and trace files are left out (large, observational).
+# SQLite files are copied with SQLite's online backup, so the services keep running.
+[Unit]
+Description=AIChain daily encrypted backup
+OnFailure=aichain-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/aichain
+ExecStartPre=+/usr/bin/install -d -m 0700 /opt/aichain/backups
+ExecStart=/opt/aichain/.venv/bin/python -m aichain.backup auto --src /opt/aichain --dir /opt/aichain/backups --keep 7 --env-file /opt/aichain/.env
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+# The databases' WAL index (-shm) is written even by readers.
+ReadWritePaths=/opt/aichain/backups /opt/aichain/data
+# Memory: tar + gzip + encryption stream in 64 KiB chunks; SQLite copies page by page.
+MemoryHigh=256M
+MemoryMax=384M

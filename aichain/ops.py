@@ -18,6 +18,20 @@ from pathlib import Path
 from typing import Callable, TextIO
 
 
+def read_env(path: Path) -> dict[str, str]:
+    """KEY=VALUE lines of an env file (the format aichain.sim.factory.load_env reads), returned
+    without touching os.environ, so secrets in it stay out of child processes."""
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            out[key.strip()] = value.strip().strip('"').strip("'")
+    return out
+
+
 def prune_files(directory: Path, pattern: str, keep_days: float, now: float | None = None) -> list[Path]:
     """Delete files matching `pattern` in `directory` last modified more than keep_days ago."""
     cutoff = (now if now is not None else time.time()) - keep_days * 86400

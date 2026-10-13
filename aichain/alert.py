@@ -23,25 +23,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
+from aichain.ops import read_env
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STATE = Path("/var/lib/aichain-alert/state.json")
 QUIET_SECONDS = 30 * 60
 FACTS = ("Result", "ExecMainCode", "ExecMainStatus", "NRestarts", "Restart", "ActiveState")
 RESULTS = {"exit-code": "비정상 종료", "signal": "시그널", "core-dump": "크래시", "watchdog": "watchdog(응답 없음)",
            "oom-kill": "메모리 한도 초과", "timeout": "시간 초과", "start-limit-hit": "재시작 한도"}
-
-
-def read_env(path: Path) -> dict[str, str]:
-    """KEY=VALUE lines of an env file (the same format aichain.sim.factory.load_env reads)."""
-    out: dict[str, str] = {}
-    if not path.exists():
-        return out
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, _, value = line.partition("=")
-            out[key.strip()] = value.strip().strip('"').strip("'")
-    return out
 
 
 def _run(cmd: list[str]) -> str:
