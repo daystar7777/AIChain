@@ -87,7 +87,7 @@ class TelegramBridge:
         if cmd == "/status":
             s = self._get("/admin/v1/status")
             nodes = "\n".join(f"- {n['id']} {n['persona']}: {n['balance']} (평판 {n['reputation']}, 예산 {n['budget_state']})"
-                              + (f" ⛔ 일시 정지: {n.get('pause_reason')}" if n.get("paused") else "")
+                              + (f" ⛔ 일시 정지 (/unpause {n['id']})" if n.get("paused") else "")
                               for n in s.get("nodes", []))
             usage = s.get("daily_usage", {}).get("*", 0)
             return f"블록 #{s['height']} · 오늘 LLM {usage}회 · 열린 현상금 {s['open_bounties']}\n{nodes}" + (

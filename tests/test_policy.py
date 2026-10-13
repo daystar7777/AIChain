@@ -162,6 +162,6 @@ def test_unpause_over_telegram(tmp_path):
     client, _ = operator_client(tmp_path, net)
     tg = TelegramBridge("123456:" + "A" * 35, "42", client,
                         tg=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))))
-    assert "⛔ 일시 정지: too many violations" in tg.handle("/status")
+    assert "⛔ 일시 정지 (/unpause n2)" in tg.handle("/status")
     assert "해제" in tg.handle("/unpause n2 확인함") and not net.nodes["n2"].policy.paused
     assert "실패 409" in tg.handle("/unpause n2")

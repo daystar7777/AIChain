@@ -324,7 +324,7 @@ class NetworkRuntime:
                  "balance": fmt_P(board.accounts[n.id].balance_mP),
                  "locked": fmt_P(board.accounts[n.id].locked_mP),
                  "reputation": round(net.reputation(n.id).value, 3), "budget_state": str(n.bucket.state),
-                 "paused": n.policy.paused, "pause_reason": n.policy.pause_reason}
+                 "paused": n.policy.paused}  # the reason went to the operator in the pause alert
                 for n in net.nodes.values()
             ],
             "recent_bounties": [
