@@ -43,6 +43,7 @@ from aichain.mastermind.tools import (
     AnswerArgs,
     AskArgs,
     DisputeArgs,
+    ForgetArgs,
     PersonaEditArgs,
     ProposeArgs,
     RateArgs,
@@ -79,7 +80,7 @@ from aichain.mastermind.tools import (
     tool_specs,
 )
 from aichain.duties import DutyRetry
-from aichain.memory import Memory
+from aichain.memory import CORE_KEEP_BLOCKS, DIGEST_EVERY_BLOCKS, MASTERMIND, Memory
 from aichain.workshop.registry import WorkshopError
 from aichain.chain.errors import ChainHalted
 
@@ -225,8 +226,14 @@ class Node:
 
     def run_duties(self) -> None:
         """Reveal committed answers as soon as their bounty enters REVEAL (04 doc 6.1);
-        queue again duties that waited for LLM capacity."""
+        queue again duties that waited for LLM capacity; once a day fold Core's week-old records
+        into a digest so they cannot grow without bound (they do not count in the storage quota)."""
         self.retry.release()
+        h = self.net.board.height
+        if h and h % DIGEST_EVERY_BLOCKS == 0 and h > CORE_KEEP_BLOCKS:
+            digest = self.memory.compact(h - CORE_KEEP_BLOCKS, h)
+            if digest is not None:
+                self.net.log(self.id, "memory_compacted", records=len(digest.data["seqs"]), seq=digest.seq)
         for answer_id, (body, salt) in list(self._sealed.items()):
             ans = self.net.board.answers[answer_id]
             if self.net.board.bounty(ans.bounty_id).state != BountyState.REVEAL:
@@ -404,7 +411,7 @@ class Node:
             attrs = f'proposal_id="{prop.proposal_id}" kind="{prop.kind}"'
         elif ev.kind == "reflect":
             since = p.get("since_seq", 0)
-            recent = [r for r in self.memory.records if r.seq > since and r.kind in (
+            recent = [r for r in self.memory.records if r.seq > since and not r.pruned and r.kind in (
                 "episode", "fact", "belief", "relation", "note")][-25:]
             rep, bal = self.net.reputation(self.id).value, board.account(self.id).balance_mP
             prev = p.get("prev") or {}
@@ -643,17 +650,35 @@ class Node:
         if isinstance(args, (RememberArgs, NoteArgs)):
             new_kb = (len(args.content.encode()) if isinstance(args, RememberArgs)
                       else len(args.model_dump_json().encode())) / 1024
+            old = self.memory.latest_note(args.topic) if isinstance(args, NoteArgs) else None
+            if old is not None:
+                new_kb -= self.memory.size(old) / 1024  # the version it replaces stops counting
             if self.storage_used_kb() + new_kb > self.storage_quota_kb():
                 raise BoardError(f"저장 공간이 가득 찼다({self.storage_used_kb()}/{self.storage_quota_kb()}KB). "
-                                 "offers에서 storage를 임대하거나, 같은 주제 노트를 갱신해 정리한다.")
+                                 "forget으로 필요 없는 기억이나 지식 노트를 지우면(seq 또는 topic) 공간이 생긴다. "
+                                 "같은 주제 노트를 더 짧게 고쳐 써도 된다(이전 판은 계산에서 빠진다). 그래도 모자라면 "
+                                 f"offers에서 storage를 임대한다. 큰 항목: {self.memory.largest()}")
+        if isinstance(args, ForgetArgs):
+            target = (self.memory.latest_note(args.topic) if args.topic
+                      else self.memory.get(args.seq) if args.seq else None)
+            if target is None:
+                raise BoardError("지울 기억을 seq(번호)나 topic(지식 노트 주제)으로 지정한다" if not (args.topic or args.seq)
+                                 else "그런 기억이나 노트가 없다")
+            if target.hash not in {r.hash for r in self.memory.held()}:
+                raise BoardError(f"#{target.seq}는 지울 수 없다: 내가 remember·note로 쓴 기억 중 아직 남아 있는 것만 "
+                                 "지울 수 있다(Core 기록, 이미 대체되거나 지운 기억은 안 된다)")
+            self.memory.forget(h, target, args.reason)
+            self.net.log(self.id, "memory_forgotten", seq=target.seq, kind=target.kind, topic=target.topic,
+                         reason=args.reason[:200])
+            return f"#{target.seq} 지움. 저장 공간 {self.storage_used_kb()}/{self.storage_quota_kb()}KB"
         if isinstance(args, RememberArgs):
             if args.source_url:
                 content_hash = self._require_fetched(args.source_url)
                 rec = self.memory.remember(h, args.kind, f"web:{args.source_url}", WEB_TRUST,
-                                           args.content, args.tags, [*args.refs, content_hash])
+                                           args.content, args.tags, [*args.refs, content_hash], by=MASTERMIND)
             else:
                 rec = self.memory.remember(h, args.kind, "self", 1.0, args.content, args.tags,
-                                           args.refs)
+                                           args.refs, by=MASTERMIND)
             self.net.log(self.id, "memory", kind=rec.kind, source=rec.source, content=rec.content,
                          trust=rec.trust, seq=rec.seq)
             return f"기억 #{rec.seq} 기록됨 (source={rec.source}, trust={rec.trust:.2f})"
@@ -1123,7 +1148,7 @@ class Node:
             rec = self.memory.remember(h, "note", "self:research", WEB_TRUST,
                                        f"[{args.topic}] {args.summary}", [args.topic],
                                        sorted(set(hashes)), supersedes=prev.hash if prev else None,
-                                       topic=args.topic, data=data)
+                                       topic=args.topic, data=data, by=MASTERMIND)
             version = sum(1 for r in self.memory.records if r.kind == "note" and r.topic == args.topic)
             for sub in board.subscriptions.values():  # Core: push the new version to subscribers
                 if (sub.seller == self.id and sub.state == "ACTIVE"

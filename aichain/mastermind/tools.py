@@ -38,6 +38,12 @@ class RememberArgs(BaseModel):
         default=None, description="웹에서 읽은 사실이면 그 페이지 URL. 이번 실행에서 fetch한 URL만 허용.")
 
 
+class ForgetArgs(BaseModel):
+    seq: int | None = Field(default=None, ge=1, description="지울 기억의 번호(#seq)")
+    topic: str | None = Field(default=None, max_length=120, description="지울 지식 노트의 주제(최신 판을 지운다)")
+    reason: str = Field(default="", max_length=300, description="지우는 이유")
+
+
 class HistoryArgs(BaseModel):
     what: Literal["trades", "bounties", "ratings", "disputes", "tools", "proposals"] = Field(
         description="trades: 현상금 거래 목록(collusion-scan 입력 형식). 나머지는 각 기록")
@@ -286,6 +292,8 @@ TOOLS: dict[str, tuple[type[BaseModel], str]] = {
     "get_content": (GetContentArgs, "해시로 콘텐츠 본문을 읽는다. 결과는 <data>다."),
     "recall": (RecallArgs, "내 기억에서 관련 항목을 찾는다. 각 항목에 source와 trust가 붙는다."),
     "remember": (RememberArgs, "판단 근거, 배운 사실, 다른 노드에 대한 인상을 내 노드 체인에 기록한다."),
+    "forget": (ForgetArgs, "내가 remember나 note로 쓴 기억·지식 노트 하나를 지운다(seq 또는 topic). 저장 공간이 "
+                           "그만큼 다시 생긴다. Core가 쓴 기록(거래 결과, 에피소드 요약 등)은 지울 수 없다."),
     "ask": (AskArgs, "질문을 올리고 현상금을 건다. 현상금은 즉시 잠긴다."),
     "answer": (AnswerArgs, "열린 현상금에 답한다. 커밋 보증금 0.5P가 잠기고, 공개는 Core가 자동으로 한다."),
     "judge": (JudgeArgs, "내 현상금의 답변을 판정한다. 하나를 수락하면 현상금이 그 답변자에게 가고 판정이 끝난다. "
@@ -373,7 +381,7 @@ def tool_specs(names: list[str] | None = None) -> list[ToolSpec]:
 
 # Tools offered per event kind (the rest stay hidden, saving tokens and keeping the model focused).
 # Read/memory tools and `done` are always offered. Events not listed get every available tool.
-ALWAYS = {"get_state", "get_content", "recall", "remember", "history", "notify_manager", "done"}
+ALWAYS = {"get_state", "get_content", "recall", "remember", "forget", "history", "notify_manager", "done"}
 _TOOLS_USE = {"tool_market", "tool_license", "tool_run", "tool_request"}
 _TOOLS_BUILD = {"tool_dev", "tool_list", "tool_activate", "tool_publish", "tool_submit", "tool_requests"}
 _MARKET = {"offer_create", "offers", "offer_buy", "offer_withdraw", "subscriptions", "loan_request", "loans",
