@@ -24,6 +24,7 @@ from aichain.bridge.tokens import DEFAULT_FILE, TokenStore
 from aichain import setup as node_setup
 from aichain.journal.store import Journal
 from aichain.memory import KnowledgeStore
+from aichain.chain.crypto import MissingKey
 from aichain.chain.store import ChainStore, ReplayMismatch
 from aichain.sim.demo import make_workshop
 from aichain.sim.factory import (
@@ -127,6 +128,10 @@ def main(argv: list[str] | None = None) -> int:
                   "edited; refusing to start. Restore it from a backup or move it aside to start a "
                   "new chain.", file=sys.stderr)
             return 3
+        except MissingKey as e:
+            print(f"refusing to start: an account key of the existing chain {args.chain} is missing or "
+                  f"wrong.\n{e}", file=sys.stderr)
+            return 4
         from aichain.manager import ApprovalBook, ManagerPolicy
 
         net.approvals = ApprovalBook(ManagerPolicy(approval_threshold_mP=round(args.approval_threshold_P * 1000),

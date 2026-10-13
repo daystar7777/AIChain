@@ -20,7 +20,7 @@ from aichain.gateways.web import SearchGateway
 from aichain.memory import KnowledgeStore
 from aichain.workshop.registry import Workshop
 from aichain.chain.crypto import KeyStore
-from aichain.chain.store import ChainStore, attach as attach_chain
+from aichain.chain.store import ROOT_ACCOUNT, ChainStore, attach as attach_chain
 from aichain.node import EpisodeResult, Node, NodeConfig
 
 SECONDS_PER_BLOCK = 5
@@ -59,8 +59,12 @@ class Network:
                 self.content.put(obj)
                 if author:
                     self.content_author.setdefault(h, author)
-            self.keys = KeyStore(chain.path.parent / "keys")
+            # Keys of accounts the chain already has are never regenerated: a missing one stops startup.
+            self.keys = KeyStore(chain.path.parent / "keys", expected=lambda name: (
+                chain.get_meta("root_pubkey") if name == ROOT_ACCOUNT
+                else getattr(self.board.accounts.get(name), "pubkey", None)))
             self.chain_stats = attach_chain(self.board, chain, self.keys)
+            self.keys.check([ROOT_ACCOUNT, *self.board.accounts])
         self.events: list[dict[str, Any]] = []
         self.episodes: list[EpisodeResult] = []
         self._trace = trace
