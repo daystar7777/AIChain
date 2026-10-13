@@ -189,7 +189,10 @@ class Journal:
         if self.run_id is None:
             return
         self._stop_writer()
-        self.write_snapshot(force=True)
+        try:
+            self.write_snapshot(force=True)
+        except Exception as e:  # e.g. disk full at shutdown: still mark the run ended
+            self._failed(e)
         with self._lock:
             self._conn.execute("UPDATE runs SET ended_at = ? WHERE id = ?", (time.time(), self.run_id))
             self._conn.commit()

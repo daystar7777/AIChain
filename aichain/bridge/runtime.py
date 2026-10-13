@@ -141,6 +141,7 @@ class NetworkRuntime:
 
     def start(self) -> None:
         if self._thread is None:
+            self.progress_at = 0.0  # "ready" (READY=1) waits for the loop's first turn
             self._thread = threading.Thread(target=self._loop, name="aichain-sim", daemon=True)
             self._thread.start()
 
