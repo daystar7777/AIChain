@@ -3,7 +3,10 @@
 import errno
 import json
 import os
+import sys
 import time
+
+import pytest
 
 from aichain.bridge import runtime as runtime_mod
 from aichain.bridge.runtime import NetworkRuntime
@@ -185,6 +188,7 @@ def notify_socket(monkeypatch):
     return sock
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="systemd notify sockets are a Linux abstract namespace")
 def test_watchdog_reports_ready_pings_while_alive_and_stops_when_stalled(monkeypatch, capsys):
     from aichain.ops import Watchdog, sd_notify
 
