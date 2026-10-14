@@ -84,6 +84,8 @@ def test_nodes_build_sell_buy_and_use_a_tool(tmp_path, dev_exec):
                                    "tests": [t.model_dump() for t in TESTS], "reason": "자주 쓰임"}),
                      ("tool_publish", {"tool_id": "n2.word-count", "version": 1,
                                        "price_install_P": 2, "price_call_P": 0.1})]
+        elif request.node_id == "n3":  # Warden gets a review event for the new tool; nothing to buy
+            steps = []
         else:
             steps = [("tool_market", {"query": "단어"}),
                      ("tool_license", {"tool_id": "n2.word-count", "version": 1}),
