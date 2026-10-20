@@ -4,7 +4,8 @@
     python -m aichain.report --hours 336        # two weeks
     python -m aichain.report --all
 
-Read-only: opens the databases in read-only mode.
+Read-only: opens the databases in read-only mode. With the chain log present (`--chain`), the
+report adds the M7 analysis section (aichain/analysis.py) from a replayed copy of the chain.
 """
 
 from __future__ import annotations
@@ -113,7 +114,7 @@ def _p(mp: int | None) -> str:
     return "-" if mp is None else f"{mp / 1000:,.1f}P"
 
 
-def render_markdown(a: dict[str, Any], title: str) -> str:
+def render_markdown(a: dict[str, Any], title: str, m7: str | None = None) -> str:
     out = [f"# {title}", "",
            f"기간: {_fmt_ts(a['period'][0])} ~ {_fmt_ts(a['period'][1])} · 블록 #{a['heights'][0]} ~ #{a['heights'][1]}", ""]
     tin, tout = a["tokens"]
@@ -146,6 +147,8 @@ def render_markdown(a: dict[str, Any], title: str) -> str:
                     f"분쟁: {json.dumps(last['disputes'], ensure_ascii=False)} · "
                     f"도구: {json.dumps(last['tools'], ensure_ascii=False)} · "
                     f"투표 일치율: {json.dumps(last['vote_agreement'], ensure_ascii=False) or '-'}", ""]
+    if m7:
+        out += [m7, ""]
     out += ["## 노드별 활동", "", "| 노드 | 에피소드 (종류/종료) | 많이 쓴 도구 |", "|---|---|---|"]
     for n in sorted(set(a["episodes"]) | set(a["tools_used"])):
         eps = ", ".join(f"{k} {v}" for k, v in a["episodes"][n].most_common())
@@ -272,12 +275,26 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--knowledge", type=Path, default=ROOT / "data" / "knowledge" / "knowledge.db")
     ap.add_argument("--out", type=Path, default=ROOT / "data" / "reports")
     ap.add_argument("--title", default=None)
+    ap.add_argument("--chain", type=Path, default=ROOT / "data" / "chain" / "chain-v2.db",
+                    help="chain log for the M7 analysis (read through a copy); skipped when missing")
+    ap.add_argument("--periods", choices=["short", "design"], default="short")
     args = ap.parse_args(argv)
     since = None if args.all else time.time() - args.hours * 3600
     analysis = analyse(collect(args.journal, args.knowledge, since))
     label = "전체 기간" if args.all else (f"최근 {args.hours:g}시간" if args.hours != 24 else "일일")
     title = args.title or f"AIChain 실험 리포트 — {label} ({time.strftime('%Y-%m-%d')})"
-    md = render_markdown(analysis, title)
+    m7 = None
+    if args.chain.exists():
+        from aichain import analysis as m7_analysis
+        from aichain.chain.store import ReplayMismatch
+
+        try:
+            board, clock = m7_analysis.load_chain(args.chain, args.periods)
+            m7 = m7_analysis.render_markdown(
+                m7_analysis.analyse(board, clock, args.journal, args.knowledge, since))
+        except ReplayMismatch as e:  # the bridge refuses to start on this too; say so in the report
+            m7 = f"## M7 분석\n\n체인 기록이 검증되지 않아 분석을 건너뛰었어요: {e}"
+    md = render_markdown(analysis, title, m7)
     args.out.mkdir(parents=True, exist_ok=True)
     stem = f"report-{time.strftime('%Y%m%d-%H%M')}" + ("-all" if args.all else f"-{int(args.hours)}h")
     (args.out / f"{stem}.md").write_text(md, encoding="utf-8")
