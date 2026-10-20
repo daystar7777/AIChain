@@ -47,6 +47,15 @@ def test_full_cycle_without_human_input():
     assert any(m.kind == "relation" for m in net.nodes["n1"].memory.records)
 
 
+
+def test_a_question_outside_code_still_has_two_answerers():
+    net, _ = make_net(persona_brain)
+    bounty = type("B", (), {"asker": "n1", "tags": ["history"]})
+    net.board.bounty = lambda _id: bounty
+    net.announce_bounty("b1")
+    heard = sorted(n.id for n in net.nodes.values() if any(e.kind == "bounty_new" for e in n._queue))
+    assert heard == ["n2", "n4"]  # Warden reviews settlements; the asker does not answer itself
+
 def test_silent_asker_leads_to_auto_split():
     net, _ = make_net(lazy_asker_brain)
     net.bridge_question("n1", "test", **DEFAULT_QUESTION)

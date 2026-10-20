@@ -73,7 +73,9 @@ def default_nodes(provider: str, model: str, nomad_model: str | None,
                   interests: dict[str, list[dict[str, str]]] | None = None) -> list[NodeConfig]:
     nodes = [
         NodeConfig("n1", "seeker", provider, model, tags_interest=[]),
-        NodeConfig("n2", "artisan", provider, model, tags_interest=["code", "python", "debugging"]),
+        # Artisan hears every question too, so each one has at least two answerers; with only
+        # code tags, Nomad was the sole answerer of everything else and won it unopposed.
+        NodeConfig("n2", "artisan", provider, model, tags_interest=["*"]),
         # Warden reviews settled bounties (review_settled) rather than answering new ones.
         NodeConfig("n3", "warden", provider, model, tags_interest=[], watch_settlements=True),
         NodeConfig("n4", "nomad", provider, nomad_model or model, temperature=0.7,
