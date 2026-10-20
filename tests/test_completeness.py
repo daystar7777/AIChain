@@ -189,3 +189,25 @@ def test_nodes_can_ask_peers_from_research_twice_a_day():
     n1.current_event = None
     assert n1.policy.dump()["self_asks"]
     assert "다른 노드의 관심사" in n1.render_event(QueuedEvent(5, 0, "research_tick", {}))
+
+
+def test_manager_is_told_when_llm_calls_keep_failing():
+    from aichain.provider_watch import ProviderWatch
+
+    net = build_network("scripted")
+    now = [0.0]
+    ProviderWatch(net, clock=lambda: now[0])
+    end = lambda **kw: net.log("n1", "episode_end", kind="research_tick", **kw)
+    end(stopped="provider_error", llm_calls=0, summary="timeout")
+    assert not net.manager_outbox  # one transient failure is not worth a message
+    end(stopped="provider_error", llm_calls=0, summary='HTTP 401: {"code":"api_key_expired"}')
+    assert len(net.manager_outbox) == 1 and "API 키" in net.manager_outbox[0]["text"]
+    end(stopped="provider_error", llm_calls=0, summary="HTTP 401")
+    assert len(net.manager_outbox) == 1  # not repeated within 6 hours
+    now[0] = 7 * 3600
+    end(stopped="provider_error", llm_calls=0, summary="HTTP 401")
+    assert len(net.manager_outbox) == 2
+    end(stopped="done", llm_calls=2, summary="ok")
+    assert "다시 됩니다" in net.manager_outbox[-1]["text"]
+    end(stopped="done", llm_calls=2, summary="ok")
+    assert len(net.manager_outbox) == 3

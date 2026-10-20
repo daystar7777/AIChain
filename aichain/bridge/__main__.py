@@ -157,6 +157,9 @@ def main(argv: list[str] | None = None) -> int:
             return 4
         from aichain.manager import ApprovalBook, ManagerPolicy
 
+        from aichain.provider_watch import ProviderWatch
+
+        ProviderWatch(net)  # Telegram alert when LLM calls keep failing (expired key, outage)
         net.approvals = ApprovalBook(ManagerPolicy(approval_threshold_mP=round(args.approval_threshold_P * 1000),
                                                    timeout_hours=args.approval_timeout_hours),
                                      ROOT / "data" / "approvals.json")
