@@ -135,7 +135,7 @@ def test_opencode_go_request_and_response_shape():
         temperature=0.4, max_output_tokens=100,
     )
     resp = adapter.complete(request)
-    assert seen["url"] == "https://opencode.ai/zen/go/v1/responses"
+    assert seen["url"] == "https://opencode.ai/inference/go/openai/v1/responses"
     assert seen["headers"]["authorization"] == "Bearer test-key"
     assert seen["headers"]["x-opencode-session"].startswith("aichain-n2-")
     assert seen["headers"]["user-agent"].startswith("aichain-proto/")
