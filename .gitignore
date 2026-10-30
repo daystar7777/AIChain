@@ -16,3 +16,6 @@ data/
 *.key
 *.db
 *.sqlite
+
+# encrypted daily backups (aichain.backup auto)
+backups/

@@ -1,7 +1,7 @@
 """OpenCode Go adapter (OpenAI Responses API format).
 
 Muse Spark 1.3 is served as `muse-spark-1.3-contributor` at
-https://opencode.ai/zen/go/v1/responses. The key comes from OPENCODE_GO_API_KEY.
+https://opencode.ai/inference/go/openai/v1/responses. The key comes from OPENCODE_GO_API_KEY.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from aichain.gateways.llm.base import (
     Usage,
 )
 
-DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
+DEFAULT_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
 DEFAULT_MODEL = "muse-spark-1.3-contributor"
 USER_AGENT = "aichain-proto/0.0.1 (+https://github.com/daystar7777/AIChain)"
 
