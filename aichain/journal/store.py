@@ -61,12 +61,13 @@ CREATE TABLE IF NOT EXISTS snapshots (
 REDACTED = "[REDACTED]"
 _SECRET_KEYS = re.compile(r"(authorization|api[_-]?key|secret|password|passwd|token)$", re.I)
 _SECRET_VALUES = [
-    re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}"),  # OpenAI-style keys (OpenCode Go uses these)
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}"),  # OpenAI-style keys (older OpenCode keys)
+    re.compile(r"\boc_sk_[A-Za-z0-9_\-]{16,}"),  # OpenCode Console keys
     re.compile(r"\bacb_[A-Za-z0-9_\-]{16,}"),  # Bridge client tokens
     re.compile(r"\bBSA[A-Za-z0-9_\-]{20,}"),  # Brave Search API keys
     re.compile(r"\b\d{6,12}:[A-Za-z0-9_\-]{30,}"),  # Telegram bot tokens
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/\-]{8,}=*"),
-    re.compile(r"(?i)((?:OPENCODE_GO_API_KEY|BRAVE_SEARCH_API_KEY|BRAVE_ANSWER_API_KEY|TELEGRAM_BOT_TOKEN)\s*=\s*)\S+"),
+    re.compile(r"(?i)((?:OPENCODE_GO_API_KEY|OPENCODE_API_KEY|BRAVE_SEARCH_API_KEY|BRAVE_ANSWER_API_KEY|TELEGRAM_BOT_TOKEN)\s*=\s*)\S+"),
 ]
 # Token counters are not secrets.
 _ALLOWED_KEYS = {"input_tokens", "output_tokens", "weighted_tokens", "tokens", "max_output_tokens",

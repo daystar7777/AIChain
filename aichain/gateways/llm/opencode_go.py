@@ -1,7 +1,10 @@
 """OpenCode Go adapter (OpenAI Responses API format).
 
 Muse Spark 1.3 is served as `muse-spark-1.3-contributor` at
-https://opencode.ai/inference/go/openai/v1/responses. The key comes from OPENCODE_GO_API_KEY.
+https://opencode.ai/inference/go/openai/v1/responses (Console docs, "Go"). The key
+(`oc_sk_...`, from OpenCode Console) comes from OPENCODE_GO_API_KEY; OPENCODE_GO_BASE_URL
+overrides the base URL. The Contributor models also need the workspace setting
+"Allow paid endpoints that train on request data" (Settings > Privacy).
 """
 
 from __future__ import annotations

@@ -160,3 +160,15 @@ def test_opencode_go_maps_http_errors():
     with pytest.raises(ProviderError) as e:
         adapter.complete(req())
     assert e.value.status == 429 and e.value.retry_after == 7.0 and e.value.retryable
+
+
+def test_opencode_base_url_can_be_overridden_from_the_environment(monkeypatch):
+    from aichain.sim.factory import build_network
+
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "k")
+    monkeypatch.setenv("OPENCODE_GO_BASE_URL", "https://example.test/go/v1/")
+    net = build_network("opencode-go")
+    assert net.gateway.adapters["opencode-go"]._url == "https://example.test/go/v1/responses"
+    monkeypatch.delenv("OPENCODE_GO_BASE_URL")
+    net = build_network("opencode-go")
+    assert net.gateway.adapters["opencode-go"]._url == "https://opencode.ai/inference/go/openai/v1/responses"

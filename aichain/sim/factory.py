@@ -9,7 +9,7 @@ from typing import TextIO
 
 from aichain.board import Params
 from aichain.gateways.llm.base import GatewayConfig, LLMGateway, ProviderAdapter
-from aichain.gateways.llm.opencode_go import DEFAULT_MODEL, OpenCodeGoAdapter
+from aichain.gateways.llm.opencode_go import DEFAULT_BASE_URL, DEFAULT_MODEL, OpenCodeGoAdapter
 from aichain.gateways.llm.scripted import Brain, ScriptedAdapter
 from aichain.gateways.web import SearchGateway
 from aichain.memory import KnowledgeStore
@@ -114,7 +114,8 @@ def build_network(
         key = os.environ.get("OPENCODE_GO_API_KEY", "")
         if not key:
             raise ConfigError("OPENCODE_GO_API_KEY is not set. Put it in .env (see .env.example).")
-        adapters["opencode-go"] = OpenCodeGoAdapter(key)
+        adapters["opencode-go"] = OpenCodeGoAdapter(
+            key, base_url=os.environ.get("OPENCODE_GO_BASE_URL") or DEFAULT_BASE_URL)
         model = model or DEFAULT_MODEL
     else:
         raise ConfigError(f"unknown provider {provider}")

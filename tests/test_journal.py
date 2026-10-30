@@ -53,6 +53,12 @@ def test_redact_masks_keys_tokens_and_headers():
     assert out["env"] == "OPENCODE_GO_API_KEY=" + REDACTED
 
 
+def test_redact_masks_opencode_console_keys_in_free_text():
+    key = "oc_sk_" + "0a1b2c3d4e5f" + "_" + "Q7w-E8r9T0y1U2i3O4p5A6s7"
+    out = json.dumps(redact({"error": f"HTTP 401 for {key}", "note": f"OPENCODE_API_KEY={key}"}))
+    assert key not in out and "0a1b2c3d4e5f" not in out
+
+
 def test_journal_records_everything_and_never_secrets(tmp_path):
     db = tmp_path / "j.db"
     leaky = {**DEFAULT_QUESTION, "body": f"내 키는 {FAKE_KEY} 이고 토큰은 Bearer {FAKE_TOKEN} 이다"}
