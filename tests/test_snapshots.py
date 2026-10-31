@@ -184,7 +184,7 @@ def test_replay_starts_from_the_newest_snapshot(tmp_path, small):
     assert stats["snapshot_height"] == heights[0] and stats["blocks"] < 100
     full = Board(params())
     stats_full = replay(full, ChainStore(db), from_snapshot=False)
-    assert "snapshot_height" not in stats_full and stats_full["blocks"] == live.height
+    assert "snapshot_height" not in stats_full and stats_full["height"] == live.height
     assert quick.state_root() == full.state_root() == live.state_root()
 
     # the restarted chain keeps going and the next start still agrees

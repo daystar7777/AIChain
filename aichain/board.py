@@ -25,7 +25,11 @@ from aichain import reputation
 # transaction, so replaying old blocks always applies the rules they were made under.
 # 2: per-answer bonds, dispute holds, void deal disputes refund, loan default caps and request
 #    expiry, delivered-purchase timeout, pairwise-netted contribution income, bounty options.
-RULES_LATEST = 2
+# 3: sparse blocks. The root writes a block only when transactions are pending, at every state-root
+#    checkpoint (ROOT_CHECK_EVERY); every transaction carries the height it was
+#    made at, so replay advances through the unwritten empty blocks exactly as the live chain did.
+#    The board itself behaves as under rules 2 (only the chain log changes).
+RULES_LATEST = 3
 # Fields added after rules 1, with their defaults. They are left out of the state root while they
 # hold the default, so a rules-1 state hashes exactly as it did before they existed.
 LATE_FIELDS: dict[str, dict[str, Any]] = {

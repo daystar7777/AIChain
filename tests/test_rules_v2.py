@@ -6,7 +6,7 @@ import random
 import pytest
 
 from aichain import audit
-from aichain.board import (CONFIRM_BLOCKS, LOAN_REQUEST_BLOCKS, Board, BoardError, BountyState,
+from aichain.board import (RULES_LATEST, CONFIRM_BLOCKS, LOAN_REQUEST_BLOCKS, Board, BoardError, BountyState,
                            Params, commitment_of)
 from aichain.chain import store as chain_store
 from aichain.chain.store import ChainStore, attach, replay
@@ -342,11 +342,11 @@ def test_old_log_replays_under_rules_1_then_upgrades(tmp_path, monkeypatch):
     monkeypatch.undo()
     new = Board(params())
     stats = attach(new, ChainStore(db))
-    assert stats["rules_upgraded_to"] == 2 and new.rules == 2
+    assert stats["rules_upgraded_to"] == RULES_LATEST and new.rules == RULES_LATEST
     assert new.purchases[stuck.purchase_id].state == "DISPUTED"
     new.rules = 1
     assert new.state_root() == root_before  # same state, same root as the old code computed
-    new.rules = 2
+    new.rules = RULES_LATEST
 
     pu = bought(new, ok=False)
     new.advance(50)
@@ -354,7 +354,7 @@ def test_old_log_replays_under_rules_1_then_upgrades(tmp_path, monkeypatch):
 
     again = Board(params())
     attach(again, ChainStore(db))
-    assert again.rules == 2 and again.state_root() == new.state_root()
+    assert again.rules == RULES_LATEST and again.state_root() == new.state_root()
     assert again.purchases[stuck.purchase_id].state == "DISPUTED"
     assert again.purchases[pu.purchase_id].state == "REFUNDED"
 
@@ -363,9 +363,9 @@ def test_fresh_chain_starts_upgraded(tmp_path):
     db = tmp_path / "chain.db"
     b = Board(params())
     attach(b, ChainStore(db))
-    assert b.rules == 2
+    assert b.rules == RULES_LATEST
     accounts(b, "x")
     b.advance(3)
     rebuilt = Board(params())
     replay(rebuilt, ChainStore(db))
-    assert rebuilt.rules == 2 and rebuilt.state_root() == b.state_root()
+    assert rebuilt.rules == RULES_LATEST and rebuilt.state_root() == b.state_root()

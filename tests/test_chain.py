@@ -119,11 +119,12 @@ def test_blocks_are_signed_linked_and_include_their_transactions(tmp_path):
     db = _signed_chain(tmp_path)
     entries = ChainStore(db).entries()
     blocks = [e for e in entries if e[0] == "block"]
-    assert len(blocks) == CHECKPOINT_EVERY
+    # Sparse blocks (rules 3): the block after the transactions, then the checkpoint.
+    assert [b[1] for b in blocks] == [1, CHECKPOINT_EVERY]
     assert all(b[3]["prev_hash"] == a[2] for a, b in zip(blocks, blocks[1:]))
     assert blocks[0][3]["tx_root"] != blocks[1][3]["tx_root"]  # the first block carries 3 txs
-    # A block removed from the middle breaks the chain.
-    _edit(db, f"DELETE FROM log WHERE kind = 'block' AND height = 50")
+    # A block removed from the chain breaks it.
+    _edit(db, f"DELETE FROM log WHERE kind = 'block' AND height = 1")
     with pytest.raises(ReplayMismatch, match="does not extend"):
         replay(Board(Params()), ChainStore(db))
 
@@ -196,3 +197,57 @@ def test_keys_are_still_created_for_a_new_chain_and_new_accounts(tmp_path):
     net.add_node(NodeConfig("n5", "nomad"))  # an account the chain does not have yet gets a key
     assert (tmp_path / "keys" / "n5.key").exists()
     assert build_network("scripted", chain=ChainStore(db)).board.accounts["n5"].pubkey == net.keys.pubkey("n5")
+
+
+def test_sparse_blocks_replay_to_the_same_state_and_height(tmp_path):
+    from aichain.chain import store as chain_store
+
+    db = tmp_path / "c.db"
+    live = Board(Params())
+    attach(live, ChainStore(db))
+    live.open_account("a", 100_000)
+    live.open_account("b", 100_000)
+    live.advance(37)
+    live.create_bounty("a", "q", 5_000, [])  # a transaction at height 37
+    live.advance(CHECKPOINT_EVERY * 3 + 11)  # ends between checkpoints: only the tip records it
+    entries = ChainStore(db).entries()
+    blocks = [e[1] for e in entries if e[0] == "block"]
+    assert blocks == [1, 38, CHECKPOINT_EVERY, 2 * CHECKPOINT_EVERY, 3 * CHECKPOINT_EVERY]
+    tx_heights = [e[3]["height"] for e in entries if e[0] == "tx"]
+    assert set(tx_heights[:-1]) == {0} and tx_heights[-1] == 37
+    # A crash-like restart (nothing flushed) resumes at exactly the live height and state.
+    again = Board(Params())
+    stats = attach(again, ChainStore(db))
+    assert again.height == live.height and stats["tip_height"] == live.height
+    assert again.state_root() == live.state_root()
+    again.advance(5)
+    third = Board(Params())
+    replay(third, ChainStore(db))
+    assert third.height == again.height and third.state_root() == again.state_root()
+
+
+def test_a_forged_tip_is_refused(tmp_path):
+    import json as _json
+
+    db = tmp_path / "c.db"
+    b = Board(Params())
+    attach(b, ChainStore(db))
+    b.open_account("a", 1)
+    b.advance(10)
+    store = ChainStore(db)
+    tip = _json.loads(store.get_meta("tip"))
+    tip["height"] += 1000  # move time forward without the root's signature
+    store.set_meta("tip", _json.dumps(tip))
+    with pytest.raises(ReplayMismatch, match="tip"):
+        replay(Board(Params()), ChainStore(db))
+
+
+def test_a_transaction_without_its_height_is_refused_under_sparse_blocks(tmp_path):
+    db = tmp_path / "c.db"
+    b = Board(Params())
+    attach(b, ChainStore(db))
+    b.open_account("a", 1)
+    b.advance(3)
+    _edit(db, "UPDATE log SET data = json_remove(data, '$.height') WHERE kind = 'tx'")
+    with pytest.raises(ReplayMismatch):
+        replay(Board(Params()), ChainStore(db))

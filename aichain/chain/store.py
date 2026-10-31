@@ -9,6 +9,13 @@
 - Block headers carry the state root every ROOT_CHECK_EVERY blocks (an empty string in between;
   older blocks carry one at every height). Computing it hashes the whole state, so doing it on
   every 5-second block cost up to half a second each.
+- From rules 3 on, blocks are sparse: a block is written only when transactions are pending, at
+  every ROOT_CHECK_EVERY-th height. Each transaction envelope then
+  carries the signed `height` it was made at; replay advances the board through the heights in
+  between (empty blocks change state only through the deterministic block loop), so the state is
+  identical while the log stops growing by one row per 5 seconds. The height reached is kept in
+  one root-signed `tip` meta row, overwritten at every block, so a restart (clean or not) resumes
+  at exactly that height.
 - Every SNAPSHOT_EVERY blocks the root signs a snapshot of the whole state (gap review B3).
 - On start the log is replayed from the newest snapshot that verifies (root signature, data hash,
   state root, and the block it was taken at), streaming the entries after it; every signature,
@@ -42,6 +49,7 @@ ROOT_CHECK_EVERY = 120
 CHECKPOINT_EVERY = ROOT_CHECK_EVERY  # kept for callers/tests
 SNAPSHOT_EVERY = 1440  # two hours of blocks; a multiple of ROOT_CHECK_EVERY
 SNAPSHOTS_KEPT = 3
+RULES_SPARSE = 3  # rules version from which blocks are sparse (see the module docstring)
 VALID_FOR_BLOCKS = 120_960
 
 # Which body field names the signer of each transaction type.
@@ -251,6 +259,34 @@ def _block_header(board: Board, st: ChainState, now_ms: int) -> dict[str, Any]:
             "tx_root": merkle_root(st.pending), "state_root": root, "proposer": ROOT_ACCOUNT}
 
 
+def _tip_digest(height: int, prev_hash: str) -> str:
+    return hash_obj({"chain_id": CHAIN_ID, "height": height, "prev_hash": prev_hash})
+
+
+def write_tip(board: Board, store: ChainStore, keys: KeyStore, st: ChainState) -> None:
+    """Sparse blocks: record the height reached past the last written block (one meta row)."""
+    tip = {"height": board.height, "prev_hash": st.prev_hash}
+    tip["sig"] = keys.sign(ROOT_ACCOUNT, "tip", _tip_digest(board.height, st.prev_hash))
+    store.set_meta("tip", json.dumps(tip))
+
+
+def _advance_to_tip(board: Board, store: ChainStore, st: ChainState, stats: dict[str, Any]) -> None:
+    raw = store.get_meta("tip")
+    if raw is None or board.rules < RULES_SPARSE:
+        return
+    try:
+        tip = json.loads(raw)
+        height, prev, sig = int(tip["height"]), tip["prev_hash"], tip["sig"]
+    except (ValueError, KeyError, TypeError):
+        raise ReplayMismatch("tip record is unreadable")
+    if prev != st.prev_hash or height <= board.height:
+        return  # older than the log's end (a block was written after it)
+    if not verify(st.root_pubkey, "tip", _tip_digest(height, prev), sig):
+        raise ReplayMismatch("tip record: bad root signature")
+    board.advance(height - board.height)
+    stats["tip_height"] = height
+
+
 def take_snapshot(board: Board, store: ChainStore, keys: KeyStore, st: ChainState, seq: int,
                   state_root: str) -> dict[str, Any]:
     """Sign and store the state right after the block at `seq` (no transactions pending)."""
@@ -308,6 +344,11 @@ def replay(board: Board, store: ChainStore, st: ChainState | None = None,
     for seq, kind, height, entry_id, data, sig in store.iter_entries(after):
         if kind == "tx":
             _check_tx(board, st, data, entry_id, sig)
+            if board.rules >= RULES_SPARSE:
+                at = data.get("height")
+                if not isinstance(at, int) or at < board.height:
+                    raise ReplayMismatch(f"tx {entry_id[:12]}: missing or past height under sparse blocks")
+                board.advance(at - board.height)  # the empty blocks that were not written
             try:
                 board.apply(data["type"], data["body"])
             except BoardError as e:
@@ -318,11 +359,13 @@ def replay(board: Board, store: ChainStore, st: ChainState | None = None,
         elif kind == "block":
             if hash_obj(data) != entry_id or not verify(st.root_pubkey, "block", entry_id, sig):
                 raise ReplayMismatch(f"block {height}: bad hash or root signature")
-            if data["prev_hash"] != st.prev_hash or data["height"] != board.height + 1:
+            sparse = board.rules >= RULES_SPARSE
+            if data["prev_hash"] != st.prev_hash or not (
+                    data["height"] > board.height if sparse else data["height"] == board.height + 1):
                 raise ReplayMismatch(f"block {height}: does not extend the chain")
             if data["tx_root"] != merkle_root(st.pending):
                 raise ReplayMismatch(f"block {height}: transactions do not match tx_root")
-            board.advance(1)
+            board.advance(data["height"] - board.height)
             version, _, digest = data["state_root"].rpartition(":")
             if (version == ROOT_VERSION and (height % ROOT_CHECK_EVERY == 0 or seq == last_block)
                     and board.state_root() != digest):
@@ -330,6 +373,7 @@ def replay(board: Board, store: ChainStore, st: ChainState | None = None,
             roots += version == ROOT_VERSION and (height % ROOT_CHECK_EVERY == 0 or seq == last_block)
             st.prev_hash, st.pending = entry_id, []
             blocks += 1
+    _advance_to_tip(board, store, st, stats)
     return {"transactions": txs, "blocks": blocks, "state_roots_checked": int(roots),
             "height": board.height, **stats}
 
@@ -362,6 +406,8 @@ def attach(board: Board, store: ChainStore, keys: KeyStore | None = None,
             env = {"v": 1, "chain_id": CHAIN_ID, "type": tx_type, "from": sender,
                    "nonce": st.nonces.get(sender, 0) + 1,
                    "valid_until": board.height + VALID_FOR_BLOCKS, "body": body}
+            if board.rules >= RULES_SPARSE:
+                env["height"] = board.height
             tx_id = hash_obj(env)
             store.append("tx", board.height, tx_id, env, keys.sign(sender, "tx", tx_id))
             st.nonces[sender] = env["nonce"]
@@ -373,14 +419,28 @@ def attach(board: Board, store: ChainStore, keys: KeyStore | None = None,
     board.recorder = record
     original = board._on_block
 
+    written = {"height": board.height}
+
+    def write_block() -> tuple[int, dict[str, Any]]:
+        header = _block_header(board, st, int(time.time() * 1000))
+        block_hash = hash_obj(header)
+        seq = store.append("block", board.height, block_hash, header,
+                           keys.sign(ROOT_ACCOUNT, "block", block_hash))
+        st.prev_hash, st.pending = block_hash, []
+        written["height"] = board.height
+        return seq, header
+
     def on_block():
         events = original()
+        if board.rules >= RULES_SPARSE and not st.pending and board.height % ROOT_CHECK_EVERY:
+            try:  # an empty block between checkpoints: replay re-derives it up to the signed tip
+                write_tip(board, store, keys, st)
+            except Exception as e:
+                board.halted = f"chain log write failed: {type(e).__name__}: {e}"
+                raise ChainHalted(board.halted) from e
+            return events
         try:
-            header = _block_header(board, st, int(time.time() * 1000))
-            block_hash = hash_obj(header)
-            seq = store.append("block", board.height, block_hash, header,
-                               keys.sign(ROOT_ACCOUNT, "block", block_hash))
-            st.prev_hash, st.pending = block_hash, []
+            seq, header = write_block()
         except Exception as e:
             board.halted = f"chain log write failed: {type(e).__name__}: {e}"
             raise ChainHalted(board.halted) from e
